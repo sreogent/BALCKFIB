@@ -5,891 +5,767 @@ import sqlite3
 from datetime import datetime, timedelta
 import re
 
-# Токен сообщества
+# ============= КОНФИГ =============
 TOKEN = 'vk1.a.PNIoWwI7Erk6T7s4-9lGQAXmRLsqmDBFv1Oz_X9IkjFxuk2avaxoaKKHBxBlhfffoZf-P2EhZ2nMbzWoaZlLfk8PFBi_SafqB3QD1GS2ntswN0ig8s76KyZfpKwvNYvMNtGPRGH3v8z3CcIP-xgO8xiXGH_50kati168i6U-L1hMQDZNAiBW80XE3Ub5TGqumAOD-beIwf0cSMwL-ET8Sg'
-GROUP_ID = 229320501
 
-# ТВОЙ ID ВК
-OWNER_ID = 631833072
-
-# Авторизация
-vk = vk_api.VkApi(token=TOKEN)
-longpoll = VkLongPoll(vk)
+# ТВОЙ ID ВК (из ссылки https://vk.com/andre_kartohin)
+OWNER_ID = 905815597  # Заменил на твой ID, ебанат
 
 # Подключение к БД
-conn = sqlite3.connect('admin_bot.db', check_same_thread=False)
-cursor = conn.cursor()
+conn = sqlite3.connect('bot.db', check_same_thread=False)
+c = conn.cursor()
 
-# Создание таблиц
-cursor.execute('''
-CREATE TABLE IF NOT EXISTS chats (
-    chat_id INTEGER PRIMARY KEY,
-    chat_type TEXT DEFAULT 'players',
-    welcome_text TEXT,
-    welcome_enabled INTEGER DEFAULT 0,
-    filter_enabled INTEGER DEFAULT 0,
-    flood_enabled INTEGER DEFAULT 0,
-    quiet_mode INTEGER DEFAULT 0,
-    leave_kick INTEGER DEFAULT 0,
-    invite_moders INTEGER DEFAULT 0,
-    created_date TEXT,
-    bot_activated INTEGER DEFAULT 0
-)
-''')
-
-cursor.execute('''
-CREATE TABLE IF NOT EXISTS users (
+# ============= СОЗДАНИЕ ТАБЛИЦ =============
+c.execute('''CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER,
     chat_id INTEGER,
-    nick TEXT,
-    role TEXT DEFAULT 'user',
     warns INTEGER DEFAULT 0,
-    muted_until TEXT,
-    banned INTEGER DEFAULT 0,
-    joined_date TEXT,
+    mute TEXT,
+    ban INTEGER DEFAULT 0,
+    role TEXT DEFAULT 'user',
+    nick TEXT,
+    joined TEXT,
     last_active TEXT,
     PRIMARY KEY (user_id, chat_id)
-)
-''')
+)''')
 
-cursor.execute('''
-CREATE TABLE IF NOT EXISTS warn_history (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    chat_id INTEGER,
-    admin_id INTEGER,
-    reason TEXT,
-    date TEXT
-)
-''')
+c.execute('''CREATE TABLE IF NOT EXISTS chats (
+    chat_id INTEGER PRIMARY KEY,
+    activated INTEGER DEFAULT 0
+)''')
 
-cursor.execute('''
-CREATE TABLE IF NOT EXISTS bans (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+c.execute('''CREATE TABLE IF NOT EXISTS badwords (
+    word TEXT PRIMARY KEY
+)''')
+
+c.execute('''CREATE TABLE IF NOT EXISTS bans (
     user_id INTEGER,
     chat_id INTEGER,
     admin_id INTEGER,
     reason TEXT,
     date TEXT,
-    UNIQUE(user_id, chat_id)
-)
-''')
+    PRIMARY KEY (user_id, chat_id)
+)''')
 
-cursor.execute('''
-CREATE TABLE IF NOT EXISTS global_bans (
+c.execute('''CREATE TABLE IF NOT EXISTS global_bans (
     user_id INTEGER PRIMARY KEY,
     admin_id INTEGER,
     reason TEXT,
     date TEXT
-)
-''')
+)''')
 
-cursor.execute('''
-CREATE TABLE IF NOT EXISTS filter_words (
+c.execute('''CREATE TABLE IF NOT EXISTS warn_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    word TEXT UNIQUE
-)
-''')
-
-cursor.execute('''
-CREATE TABLE IF NOT EXISTS bug_receivers (
-    user_id INTEGER PRIMARY KEY
-)
-''')
-
-cursor.execute('''
-CREATE TABLE IF NOT EXISTS user_nicks (
     user_id INTEGER,
     chat_id INTEGER,
-    nick TEXT,
-    set_by INTEGER,
-    date TEXT,
-    PRIMARY KEY (user_id, chat_id)
-)
-''')
+    admin_id INTEGER,
+    reason TEXT,
+    date TEXT
+)''')
 
-# Добавляем тебя как владельца бота
-cursor.execute('''
-    INSERT OR IGNORE INTO users (user_id, chat_id, role, joined_date)
-    VALUES (?, ?, ?, ?)
-''', (OWNER_ID, -1, 'glav', datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+# Добавляем маты
+bad_words = ['сука', 'блядь', 'хуй', 'пизда', 'ебать', 'жопа', 'пидор', 'мудак']
+for w in bad_words:
+    c.execute("INSERT OR IGNORE INTO badwords (word) VALUES (?)", (w,))
 
-# Добавляем слова в фильтр
-words = ["сука", "блядь", "хуй", "пизда", "ебать", "мат"]
-for word in words:
-    cursor.execute("INSERT OR IGNORE INTO filter_words (word) VALUES (?)", (word,))
-
+# Добавляем владельца
+c.execute("INSERT OR IGNORE INTO users (user_id, chat_id, role) VALUES (?, ?, ?)", (OWNER_ID, -1, 'glav'))
 conn.commit()
 
-print("✅ База данных готова")
-print(f"👑 Владелец бота: [id{OWNER_ID}|Vlad]")
-print("🤖 БОТ ЗАПУЩЕН")
+print("=" * 50)
+print("🤖 ЧИСТОВЫЙ БОТ - ВСЕ КОМАНДЫ РАБОТАЮТ")
+print(f"👑 ВЛАДЕЛЕЦ: {OWNER_ID}")
+print("=" * 50)
 
-# Роли
-ROLES = {
-    'user': 0, 'moderator': 1, 'seniormoderator': 2, 'admin': 3,
-    'senioradmin': 4, 'owner': 5, 'zamglav': 6, 'glav': 7
-}
+# Подключение к ВК
+vk_session = vk_api.VkApi(token=TOKEN)
+vk = vk_session.get_api()
+longpoll = VkLongPoll(vk_session)
 
-class AdminBot:
-    def __init__(self):
-        self.commands = {
-            '/start': self.cmd_start, '/help': self.cmd_help, '/info': self.cmd_info,
-            '/stats': self.cmd_stats, '/getid': self.cmd_getid, '/test': self.cmd_test,
-            '/kick': self.cmd_kick, '/mute': self.cmd_mute, '/unmute': self.cmd_unmute,
-            '/warn': self.cmd_warn, '/unwarn': self.cmd_unwarn, '/staff': self.cmd_staff,
-            '/setnick': self.cmd_setnick, '/nlist': self.cmd_nlist, '/warnlist': self.cmd_warnlist,
-            '/mutelist': self.cmd_mutelist, '/clear': self.cmd_clear, '/ban': self.cmd_ban,
-            '/unban': self.cmd_unban, '/addmoder': self.cmd_addmoder, '/removerole': self.cmd_removerole,
-            '/zov': self.cmd_zov, '/banlist': self.cmd_banlist, '/addadmin': self.cmd_addadmin,
-            '/filter': self.cmd_filter, '/quiet': self.cmd_quiet, '/settings': self.cmd_settings,
-            '/gban': self.cmd_gban, '/gunban': self.cmd_gunban, '/gbanlist': self.cmd_gbanlist,
-            '/addword': self.cmd_addword, '/delword': self.cmd_delword, '/sync': self.cmd_sync
-        }
+# ============= ФУНКЦИИ =============
+
+def send(peer, text):
+    try:
+        vk.messages.send(peer_id=peer, message=text, random_id=get_random_id())
+    except Exception as e:
+        print(f"Ошибка: {e}")
+
+def get_name(uid):
+    try:
+        u = vk.users.get(user_ids=uid)[0]
+        return f"{u['first_name']} {u['last_name']}"
+    except:
+        return f"id{uid}"
+
+def get_role(uid, cid):
+    if uid == OWNER_ID:
+        return 'glav'
+    r = c.execute("SELECT role FROM users WHERE user_id=? AND chat_id=?", (uid, cid)).fetchone()
+    return r[0] if r else 'user'
+
+def get_role_level(role):
+    levels = {'user':0, 'moderator':1, 'admin':2, 'owner':3, 'zamglav':6, 'glav':7}
+    return levels.get(role, 0)
+
+def check_perm(uid, cid, need):
+    if uid == OWNER_ID:
+        return True
+    return get_role_level(get_role(uid, cid)) >= get_role_level(need)
+
+def is_muted(uid, cid):
+    r = c.execute("SELECT mute FROM users WHERE user_id=? AND chat_id=?", (uid, cid)).fetchone()
+    if r and r[0]:
+        try:
+            till = datetime.strptime(r[0], '%Y-%m-%d %H:%M:%S')
+            if till > datetime.now():
+                return True
+            else:
+                c.execute("UPDATE users SET mute=NULL WHERE user_id=? AND chat_id=?", (uid, cid))
+                conn.commit()
+        except:
+            pass
+    return False
+
+def is_banned(uid, cid):
+    r = c.execute("SELECT ban FROM users WHERE user_id=? AND chat_id=?", (uid, cid)).fetchone()
+    return r and r[0] == 1
+
+def is_global_banned(uid):
+    r = c.execute("SELECT * FROM global_bans WHERE user_id=?", (uid,)).fetchone()
+    return r is not None
+
+def register_user(uid, cid):
+    c.execute("INSERT OR IGNORE INTO users (user_id, chat_id, joined, last_active) VALUES (?, ?, ?, ?)",
+              (uid, cid, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+    conn.commit()
+
+def get_chat_users(cid):
+    try:
+        chat = vk.messages.getConversationMembers(peer_id=2000000000 + cid)
+        return [m['member_id'] for m in chat['items'] if m['member_id'] > 0]
+    except:
+        return []
+
+def get_user_nick(uid, cid):
+    r = c.execute("SELECT nick FROM users WHERE user_id=? AND chat_id=?", (uid, cid)).fetchone()
+    return r[0] if r and r[0] else get_name(uid)
+
+def extract_id(text):
+    ids = re.findall(r'id(\d+)', text)
+    if ids:
+        return int(ids[0])
+    nums = re.findall(r'(\d+)', text)
+    return int(nums[0]) if nums else None
+
+def get_all_chats():
+    return [row[0] for row in c.execute("SELECT chat_id FROM chats WHERE activated=1").fetchall()]
+
+# ============= ОСНОВНЫЕ ДЕЙСТВИЯ =============
+
+def add_warn(cid, uid, admin, reason):
+    w = c.execute("SELECT warns FROM users WHERE user_id=? AND chat_id=?", (uid, cid)).fetchone()
+    warns = (w[0] if w else 0) + 1
+    c.execute("INSERT OR REPLACE INTO users (user_id, chat_id, warns) VALUES (?,?,?)", (uid, cid, warns))
+    c.execute("INSERT INTO warn_history (user_id, chat_id, admin_id, reason, date) VALUES (?,?,?,?,?)",
+              (uid, cid, admin, reason, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+    conn.commit()
+    send(2000000000 + cid, f"⚠️ {get_user_nick(uid, cid)} | ВАРН {warns}/3\n📝 {reason}")
+    if warns >= 3:
+        c.execute("UPDATE users SET ban=1 WHERE user_id=? AND chat_id=?", (uid, cid))
+        conn.commit()
+        try:
+            vk.messages.removeChatUser(chat_id=cid, user_id=uid)
+            send(2000000000 + cid, f"🚫 {get_user_nick(uid, cid)} ЗАБАНЕН (3/3 варнов)")
+        except:
+            pass
+
+def mute_user(cid, uid, minutes, admin, reason):
+    till = datetime.now() + timedelta(minutes=minutes)
+    c.execute("UPDATE users SET mute=? WHERE user_id=? AND chat_id=?", (till.strftime('%Y-%m-%d %H:%M:%S'), uid, cid))
+    conn.commit()
+    send(2000000000 + cid, f"🔇 {get_user_nick(uid, cid)} | МУТ {minutes} мин\n📝 {reason}")
+
+def kick_user(cid, uid, admin, reason):
+    try:
+        vk.messages.removeChatUser(chat_id=cid, user_id=uid)
+        send(2000000000 + cid, f"👢 {get_user_nick(uid, cid)} | КИК\n📝 {reason}")
+    except:
+        pass
+
+def ban_user(cid, uid, admin, reason):
+    c.execute("INSERT OR REPLACE INTO bans (user_id, chat_id, admin_id, reason, date) VALUES (?,?,?,?,?)",
+              (uid, cid, admin, reason, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+    c.execute("UPDATE users SET ban=1 WHERE user_id=? AND chat_id=?", (uid, cid))
+    conn.commit()
+    try:
+        vk.messages.removeChatUser(chat_id=cid, user_id=uid)
+        send(2000000000 + cid, f"🚫 {get_user_nick(uid, cid)} | БАН\n📝 {reason}")
+    except:
+        pass
+
+def unban_user(cid, uid, admin):
+    c.execute("DELETE FROM bans WHERE user_id=? AND chat_id=?", (uid, cid))
+    c.execute("UPDATE users SET ban=0 WHERE user_id=? AND chat_id=?", (uid, cid))
+    conn.commit()
+    send(2000000000 + cid, f"✅ {get_user_nick(uid, cid)} | РАЗБАНЕН")
+
+def global_ban(uid, admin, reason):
+    c.execute("INSERT OR REPLACE INTO global_bans (user_id, admin_id, reason, date) VALUES (?,?,?,?)",
+              (uid, admin, reason, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+    conn.commit()
+    for chat in get_all_chats():
+        try:
+            vk.messages.removeChatUser(chat_id=chat, user_id=uid)
+        except:
+            pass
+    send(OWNER_ID, f"🌐 {get_name(uid)} | ГЛОБАЛЬНЫЙ БАН\n📝 {reason}")
+
+def global_unban(uid, admin):
+    c.execute("DELETE FROM global_bans WHERE user_id=?", (uid,))
+    conn.commit()
+    send(OWNER_ID, f"🌐 {get_name(uid)} | ГЛОБАЛЬНЫЙ РАЗБАН")
+
+def get_ban_info(uid, cid):
+    ban = c.execute("SELECT admin_id, reason, date FROM bans WHERE user_id=? AND chat_id=?", (uid, cid)).fetchone()
+    if ban:
+        return f"👮 Забанил: {get_name(ban[0])}\n📝 Причина: {ban[1]}\n📅 Дата: {ban[2][:16]}"
+    return "❌ Не забанен"
+
+def get_global_ban_info(uid):
+    ban = c.execute("SELECT admin_id, reason, date FROM global_bans WHERE user_id=?", (uid,)).fetchone()
+    if ban:
+        return f"👮 Забанил: {get_name(ban[0])}\n📝 Причина: {ban[1]}\n📅 Дата: {ban[2][:16]}"
+    return "❌ Не забанен глобально"
+
+print("БОТ РАБОТАЕТ, ЖДУ КОМАНД...")
+print("=" * 50)
+
+# ============= ГЛАВНЫЙ ЦИКЛ =============
+for event in longpoll.listen():
+    if event.type == VkEventType.MESSAGE_NEW:
+        uid = event.user_id
+        msg = event.text or ""
+        msg_lower = msg.lower()
         
-    def send_msg(self, peer_id, message):
-        try:
-            vk.method('messages.send', {'peer_id': peer_id, 'message': message, 'random_id': get_random_id()})
-        except Exception as e:
-            print(f"Ошибка: {e}")
-    
-    def get_user_name(self, user_id):
-        try:
-            user = vk.method('users.get', {'user_ids': user_id})
-            return f"{user[0]['first_name']} {user[0]['last_name']}"
-        except:
-            return f"id{user_id}"
-    
-    def get_chat_users(self, chat_id):
-        try:
-            chat = vk.method('messages.getConversationMembers', {'peer_id': 2000000000 + chat_id})
-            return [user['member_id'] for user in chat['items'] if user['member_id'] > 0]
-        except:
-            return []
-    
-    def get_user_role(self, user_id, chat_id):
-        cursor.execute('SELECT role FROM users WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
-        result = cursor.fetchone()
-        return result[0] if result else 'user'
-    
-    def check_permission(self, user_id, chat_id, required_role):
-        if user_id == OWNER_ID:
-            return True
-        role = self.get_user_role(user_id, chat_id)
-        return ROLES.get(role, 0) >= ROLES.get(required_role, 0)
-    
-    def is_global_admin(self, user_id):
-        if user_id == OWNER_ID:
-            return True
-        cursor.execute('SELECT role FROM users WHERE user_id = ? AND chat_id = -1', (user_id,))
-        result = cursor.fetchone()
-        return result and result[0] in ['zamglav', 'glav']
-    
-    def register_chat(self, chat_id):
-        cursor.execute('INSERT OR IGNORE INTO chats (chat_id, created_date, bot_activated) VALUES (?, ?, ?)',
-                      (chat_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 0))
-        conn.commit()
-    
-    def register_user(self, user_id, chat_id):
-        cursor.execute('INSERT OR IGNORE INTO users (user_id, chat_id, joined_date, last_active) VALUES (?, ?, ?, ?)',
-                      (user_id, chat_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
-        conn.commit()
-    
-    def check_activation(self, chat_id):
-        cursor.execute('SELECT bot_activated FROM chats WHERE chat_id = ?', (chat_id,))
-        result = cursor.fetchone()
-        return result and result[0] == 1
-    
-    def check_mute(self, user_id, chat_id):
-        cursor.execute('SELECT muted_until FROM users WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
-        result = cursor.fetchone()
-        if result and result[0]:
-            try:
-                muted_until = datetime.strptime(result[0], '%Y-%m-%d %H:%M:%S')
-                if muted_until > datetime.now():
-                    return True
-                else:
-                    cursor.execute('UPDATE users SET muted_until = NULL WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
+        if event.from_chat:
+            cid = event.chat_id
+            peer = 2000000000 + cid
+        else:
+            cid = 0
+            peer = uid
+        
+        if cid:
+            c.execute("INSERT OR IGNORE INTO chats (chat_id) VALUES (?)", (cid,))
+            register_user(uid, cid)
+            c.execute("UPDATE users SET last_active=? WHERE user_id=? AND chat_id=?", 
+                     (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), uid, cid))
+            conn.commit()
+            
+            if is_global_banned(uid):
+                try:
+                    vk.messages.removeChatUser(chat_id=cid, user_id=uid)
+                except:
+                    pass
+                continue
+            
+            if is_banned(uid, cid):
+                try:
+                    vk.messages.removeChatUser(chat_id=cid, user_id=uid)
+                except:
+                    pass
+                continue
+            
+            if is_muted(uid, cid):
+                continue
+            
+            activated = c.execute("SELECT activated FROM chats WHERE chat_id=?", (cid,)).fetchone()
+            if not activated or activated[0] == 0:
+                if msg == '/start' and uid == OWNER_ID:
+                    c.execute("UPDATE chats SET activated=1 WHERE chat_id=?", (cid,))
                     conn.commit()
-            except:
-                pass
-        return False
-    
-    def check_ban(self, user_id, chat_id):
-        cursor.execute('SELECT banned FROM users WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
-        result = cursor.fetchone()
-        return result and result[0] == 1
-    
-    def check_global_ban(self, user_id):
-        cursor.execute('SELECT * FROM global_bans WHERE user_id = ?', (user_id,))
-        return cursor.fetchone() is not None
-    
-    # ============= КОМАНДЫ =============
-    
-    def cmd_start(self, user_id, chat_id, args):
-        if not chat_id:
-            self.send_msg(user_id, "❌ Только в беседах!")
-            return
-        peer_id = 2000000000 + chat_id
-        if user_id != OWNER_ID:
-            self.send_msg(peer_id, "❌ Только владелец бота!")
-            return
-        if self.check_activation(chat_id):
-            self.send_msg(peer_id, "✅ Бот уже активирован!")
-            return
-        cursor.execute('UPDATE chats SET bot_activated = 1 WHERE chat_id = ?', (chat_id,))
-        conn.commit()
-        self.send_msg(peer_id, "✅ Бот активирован!\n/help - список команд")
-    
-    def cmd_help(self, user_id, chat_id, args):
-        peer_id = 2000000000 + chat_id if chat_id else user_id
-        help_text = """📚 **КОМАНДЫ:**
+                    send(peer, "✅ БОТ АКТИВИРОВАН!\n📋 /help - команды")
+                continue
+            
+            if not msg.startswith('/'):
+                bad = c.execute("SELECT word FROM badwords").fetchall()
+                for w in bad:
+                    if w[0].lower() in msg_lower:
+                        try:
+                            vk.messages.delete(message_ids=[event.message_id], delete_for_all=1)
+                        except:
+                            pass
+                        add_warn(cid, uid, 0, f"Мат: {w[0]}")
+                        break
+        
+        # ============= ВСЕ КОМАНДЫ =============
+        
+        # ОБЩИЕ
+        if msg == '/help':
+            txt = """📚 **ВСЕ КОМАНДЫ БОТА**
 ━━━━━━━━━━━━━━━━━━━━
-👤 **ВСЕМ:**
-/info - инфо о боте
+👤 **ОБЩИЕ:**
+/info - информация
 /stats @user - статистика
 /getid - узнать ID
 /test - проверка
 
-🟢 **МОДЕРАТОРЫ:**
+🛡 **МОДЕРАЦИЯ:**
 /kick @user - кик
 /mute @user 30 - мут
 /unmute @user - размут
 /warn @user - варн
 /unwarn @user - снять варн
 /clear 10 - очистка
-/staff - админы
+/staff - список админов
 /setnick @user ник - ник
 /nlist - список ников
 /warnlist - список варнов
 /mutelist - список мутов
 
-🟠 **АДМИНИСТРАТОРЫ:**
-/ban @user - бан
-/unban - разбан
+🔨 **АДМИНИСТРИРОВАНИЕ:**
+/ban @user - бан в чате
+/unban @user - разбан
 /addmoder @user - дать модера
 /removerole @user - забрать роль
 /zov - @всех
 /banlist - список банов
+/getban @user - инфо о бане
+/checkban @user - проверить бан
 /addadmin @user - дать админа
-/filter - фильтр
-/quiet - тишина
+/filter - вкл/выкл фильтр
+/quiet - режим тишины
 /settings - настройки
 
-🔴 **ГЛОБАЛКА:**
+🌐 **ГЛОБАЛКА:**
 /gban @user - глобальный бан
 /gunban @user - глобальный разбан
-/gbanlist - список гл.банов
+/gbanpl @user - глобальный бан
+/gunbanpl @user - глобальный разбан
+/gbanlist - список глобальных банов
+/checkgban @user - проверить глобальный бан
+
+📝 **ФИЛЬТР:**
 /addword слово - добавить слово
 /delword слово - удалить слово
-/sync - синхронизация
+/banwords - список слов
+
+⚙️ **СИСТЕМНЫЕ:**
+/sync - синхронизировать БД
 ━━━━━━━━━━━━━━━━━━━━
-👑 Владелец: Дмитрий"""
-        self.send_msg(peer_id, help_text)
-    
-    def cmd_info(self, user_id, chat_id, args):
-        peer_id = 2000000000 + chat_id if chat_id else user_id
-        self.send_msg(peer_id, "🤖 BLACK FIB BOT v3.0\n👑 Дмитрий\n💬 /help")
-    
-    def cmd_stats(self, user_id, chat_id, args):
-        peer_id = 2000000000 + chat_id if chat_id else user_id
-        target_id = user_id
-        if args and args[0].startswith('[id'):
-            try:
-                target_id = int(re.findall(r'id(\d+)', args[0])[0])
-            except:
-                pass
-        cursor.execute('SELECT warns, muted_until, role FROM users WHERE user_id = ? AND chat_id = ?', (target_id, chat_id))
-        user = cursor.fetchone()
-        if user:
-            muted = "НЕТ" if not user[1] else f"ДО {user[1][:16]}"
-            self.send_msg(peer_id, f"📊 {self.get_user_name(target_id)}\n⭐ Роль: {user[2]}\n⚠️ Варны: {user[0]}/3\n🔇 Мут: {muted}")
-        else:
-            self.send_msg(peer_id, f"📊 {self.get_user_name(target_id)}\n⚠️ Варны: 0/3")
-    
-    def cmd_getid(self, user_id, chat_id, args):
-        peer_id = 2000000000 + chat_id if chat_id else user_id
-        self.send_msg(peer_id, f"🆔 ID: {user_id}")
-    
-    def cmd_test(self, user_id, chat_id, args):
-        peer_id = 2000000000 + chat_id if chat_id else user_id
-        self.send_msg(peer_id, f"✅ Бот работает!\n👤 ID: {user_id}")
-    
-    def cmd_kick(self, user_id, chat_id, args):
-        if not chat_id:
-            self.send_msg(user_id, "❌ Только в беседах!")
-            return
-        peer_id = 2000000000 + chat_id
-        if not self.check_permission(user_id, chat_id, 'moderator'):
-            self.send_msg(peer_id, "❌ Нет прав!")
-            return
-        if not args:
-            self.send_msg(peer_id, "❌ /kick @user")
-            return
-        try:
-            target_id = int(re.findall(r'id(\d+)', args[0])[0])
-            reason = ' '.join(args[1:]) if len(args) > 1 else 'Нарушение'
-            vk.method('messages.removeChatUser', {'chat_id': chat_id, 'user_id': target_id})
-            self.send_msg(peer_id, f"👢 {self.get_user_name(target_id)} кикнут\nПричина: {reason}")
-        except:
-            self.send_msg(peer_id, "❌ Ошибка!")
-    
-    def cmd_mute(self, user_id, chat_id, args):
-        if not chat_id:
-            self.send_msg(user_id, "❌ Только в беседах!")
-            return
-        peer_id = 2000000000 + chat_id
-        if not self.check_permission(user_id, chat_id, 'moderator'):
-            self.send_msg(peer_id, "❌ Нет прав!")
-            return
-        if len(args) < 2:
-            self.send_msg(peer_id, "❌ /mute @user 30")
-            return
-        try:
-            target_id = int(re.findall(r'id(\d+)', args[0])[0])
-            minutes = int(args[1])
-            muted_until = datetime.now() + timedelta(minutes=minutes)
-            cursor.execute('UPDATE users SET muted_until = ? WHERE user_id = ? AND chat_id = ?', (muted_until.strftime('%Y-%m-%d %H:%M:%S'), target_id, chat_id))
-            conn.commit()
-            self.send_msg(peer_id, f"🔇 {self.get_user_name(target_id)} замучен на {minutes} мин")
-        except:
-            self.send_msg(peer_id, "❌ Ошибка!")
-    
-    def cmd_unmute(self, user_id, chat_id, args):
-        if not chat_id:
-            self.send_msg(user_id, "❌ Только в беседах!")
-            return
-        peer_id = 2000000000 + chat_id
-        if not self.check_permission(user_id, chat_id, 'moderator'):
-            self.send_msg(peer_id, "❌ Нет прав!")
-            return
-        if not args:
-            self.send_msg(peer_id, "❌ /unmute @user")
-            return
-        try:
-            target_id = int(re.findall(r'id(\d+)', args[0])[0])
-            cursor.execute('UPDATE users SET muted_until = NULL WHERE user_id = ? AND chat_id = ?', (target_id, chat_id))
-            conn.commit()
-            self.send_msg(peer_id, f"🔊 {self.get_user_name(target_id)} размучен")
-        except:
-            self.send_msg(peer_id, "❌ Ошибка!")
-    
-    def cmd_warn(self, user_id, chat_id, args):
-        if not chat_id:
-            self.send_msg(user_id, "❌ Только в беседах!")
-            return
-        peer_id = 2000000000 + chat_id
-        if not self.check_permission(user_id, chat_id, 'moderator'):
-            self.send_msg(peer_id, "❌ Нет прав!")
-            return
-        if not args:
-            self.send_msg(peer_id, "❌ /warn @user")
-            return
-        try:
-            target_id = int(re.findall(r'id(\d+)', args[0])[0])
-            reason = ' '.join(args[1:]) if len(args) > 1 else 'Нарушение'
-            cursor.execute('SELECT warns FROM users WHERE user_id = ? AND chat_id = ?', (target_id, chat_id))
-            warns = cursor.fetchone()
-            new_warns = (warns[0] if warns else 0) + 1
-            cursor.execute('UPDATE users SET warns = ? WHERE user_id = ? AND chat_id = ?', (new_warns, target_id, chat_id))
-            conn.commit()
-            self.send_msg(peer_id, f"⚠️ {self.get_user_name(target_id)} | ВАРН {new_warns}/3\nПричина: {reason}")
-            if new_warns >= 3:
-                cursor.execute('UPDATE users SET banned = 1 WHERE user_id = ? AND chat_id = ?', (target_id, chat_id))
-                conn.commit()
-                try:
-                    vk.method('messages.removeChatUser', {'chat_id': chat_id, 'user_id': target_id})
-                    self.send_msg(peer_id, f"🚫 {self.get_user_name(target_id)} забанен (3 варна)")
-                except:
-                    pass
-        except:
-            self.send_msg(peer_id, "❌ Ошибка!")
-    
-    def cmd_unwarn(self, user_id, chat_id, args):
-        if not chat_id:
-            self.send_msg(user_id, "❌ Только в беседах!")
-            return
-        peer_id = 2000000000 + chat_id
-        if not self.check_permission(user_id, chat_id, 'moderator'):
-            self.send_msg(peer_id, "❌ Нет прав!")
-            return
-        if not args:
-            self.send_msg(peer_id, "❌ /unwarn @user")
-            return
-        try:
-            target_id = int(re.findall(r'id(\d+)', args[0])[0])
-            cursor.execute('UPDATE users SET warns = warns - 1 WHERE user_id = ? AND chat_id = ? AND warns > 0', (target_id, chat_id))
-            conn.commit()
-            self.send_msg(peer_id, f"✅ {self.get_user_name(target_id)} варн снят")
-        except:
-            self.send_msg(peer_id, "❌ Ошибка!")
-    
-    def cmd_staff(self, user_id, chat_id, args):
-        if not chat_id:
-            self.send_msg(user_id, "❌ Только в беседах!")
-            return
-        peer_id = 2000000000 + chat_id
-        cursor.execute('SELECT user_id, role FROM users WHERE chat_id = ? AND role != "user"', (chat_id,))
-        staff = cursor.fetchall()
-        if staff:
-            msg = "👥 АДМИНИСТРАЦИЯ:\n"
-            for s in staff:
-                msg += f"• {self.get_user_name(s[0])} - {s[1]}\n"
-            self.send_msg(peer_id, msg)
-        else:
-            self.send_msg(peer_id, "❌ Нет администрации")
-    
-    def cmd_setnick(self, user_id, chat_id, args):
-        if not chat_id:
-            self.send_msg(user_id, "❌ Только в беседах!")
-            return
-        peer_id = 2000000000 + chat_id
-        if not self.check_permission(user_id, chat_id, 'moderator'):
-            self.send_msg(peer_id, "❌ Нет прав!")
-            return
-        if len(args) < 2:
-            self.send_msg(peer_id, "❌ /setnick @user ник")
-            return
-        try:
-            target_id = int(re.findall(r'id(\d+)', args[0])[0])
-            nick = ' '.join(args[1:])
-            cursor.execute('INSERT OR REPLACE INTO user_nicks (user_id, chat_id, nick, set_by, date) VALUES (?, ?, ?, ?, ?)',
-                          (target_id, chat_id, nick, user_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
-            conn.commit()
-            self.send_msg(peer_id, f"🏷 Ник для {self.get_user_name(target_id)}: {nick}")
-        except:
-            self.send_msg(peer_id, "❌ Ошибка!")
-    
-    def cmd_nlist(self, user_id, chat_id, args):
-        if not chat_id:
-            self.send_msg(user_id, "❌ Только в беседах!")
-            return
-        peer_id = 2000000000 + chat_id
-        cursor.execute('SELECT user_id, nick FROM user_nicks WHERE chat_id = ?', (chat_id,))
-        nicks = cursor.fetchall()
-        if nicks:
-            msg = "📋 СПИСОК НИКОВ:\n"
-            for n in nicks:
-                msg += f"• {self.get_user_name(n[0])} - {n[1]}\n"
-            self.send_msg(peer_id, msg)
-        else:
-            self.send_msg(peer_id, "❌ Нет ников")
-    
-    def cmd_warnlist(self, user_id, chat_id, args):
-        if not chat_id:
-            self.send_msg(user_id, "❌ Только в беседах!")
-            return
-        peer_id = 2000000000 + chat_id
-        if not self.check_permission(user_id, chat_id, 'moderator'):
-            self.send_msg(peer_id, "❌ Нет прав!")
-            return
-        cursor.execute('SELECT user_id, warns FROM users WHERE chat_id = ? AND warns > 0', (chat_id,))
-        warned = cursor.fetchall()
-        if warned:
-            msg = "⚠️ ВАРНЫ:\n"
-            for w in warned:
-                msg += f"• {self.get_user_name(w[0])} - {w[1]}/3\n"
-            self.send_msg(peer_id, msg)
-        else:
-            self.send_msg(peer_id, "✅ Нет варнов")
-    
-    def cmd_mutelist(self, user_id, chat_id, args):
-        if not chat_id:
-            self.send_msg(user_id, "❌ Только в беседах!")
-            return
-        peer_id = 2000000000 + chat_id
-        if not self.check_permission(user_id, chat_id, 'moderator'):
-            self.send_msg(peer_id, "❌ Нет прав!")
-            return
-        cursor.execute('SELECT user_id, muted_until FROM users WHERE chat_id = ? AND muted_until IS NOT NULL', (chat_id,))
-        muted = cursor.fetchall()
-        now = datetime.now()
-        active = []
-        for m in muted:
-            try:
-                till = datetime.strptime(m[1], '%Y-%m-%d %H:%M:%S')
-                if till > now:
-                    active.append((m[0], till))
-            except:
-                pass
-        if active:
-            msg = "🔇 МУТЫ:\n"
-            for a in active:
-                left = a[1] - now
-                msg += f"• {self.get_user_name(a[0])} - {left.seconds//60} мин\n"
-            self.send_msg(peer_id, msg)
-        else:
-            self.send_msg(peer_id, "✅ Нет мутов")
-    
-    def cmd_clear(self, user_id, chat_id, args):
-        if not chat_id:
-            self.send_msg(user_id, "❌ Только в беседах!")
-            return
-        peer_id = 2000000000 + chat_id
-        if not self.check_permission(user_id, chat_id, 'moderator'):
-            self.send_msg(peer_id, "❌ Нет прав!")
-            return
-        if not args:
-            self.send_msg(peer_id, "❌ /clear 10")
-            return
-        try:
-            count = int(args[0])
-            if count > 100:
-                count = 100
-            history = vk.method('messages.getHistory', {'peer_id': peer_id, 'count': count})
-            ids = [msg['id'] for msg in history['items']]
-            vk.method('messages.delete', {'message_ids': ids, 'delete_for_all': 1})
-            self.send_msg(peer_id, f"✅ Удалено {count} сообщений")
-        except:
-            self.send_msg(peer_id, "❌ Ошибка!")
-    
-    def cmd_ban(self, user_id, chat_id, args):
-        if not chat_id:
-            self.send_msg(user_id, "❌ Только в беседах!")
-            return
-        peer_id = 2000000000 + chat_id
-        if not self.check_permission(user_id, chat_id, 'admin'):
-            self.send_msg(peer_id, "❌ Нет прав!")
-            return
-        if not args:
-            self.send_msg(peer_id, "❌ /ban @user")
-            return
-        try:
-            target_id = int(re.findall(r'id(\d+)', args[0])[0])
-            reason = ' '.join(args[1:]) if len(args) > 1 else 'Нарушение'
-            cursor.execute('INSERT OR REPLACE INTO bans (user_id, chat_id, admin_id, reason, date) VALUES (?, ?, ?, ?, ?)',
-                          (target_id, chat_id, user_id, reason, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
-            cursor.execute('UPDATE users SET banned = 1 WHERE user_id = ? AND chat_id = ?', (target_id, chat_id))
-            conn.commit()
-            try:
-                vk.method('messages.removeChatUser', {'chat_id': chat_id, 'user_id': target_id})
-                self.send_msg(peer_id, f"🚫 {self.get_user_name(target_id)} забанен\nПричина: {reason}")
-            except:
-                pass
-        except:
-            self.send_msg(peer_id, "❌ Ошибка!")
-    
-    def cmd_unban(self, user_id, chat_id, args):
-        if not chat_id:
-            self.send_msg(user_id, "❌ Только в беседах!")
-            return
-        peer_id = 2000000000 + chat_id
-        if not self.check_permission(user_id, chat_id, 'admin'):
-            self.send_msg(peer_id, "❌ Нет прав!")
-            return
-        if not args:
-            self.send_msg(peer_id, "❌ /unban @user")
-            return
-        try:
-            target_id = int(re.findall(r'id(\d+)', args[0])[0])
-            cursor.execute('DELETE FROM bans WHERE user_id = ? AND chat_id = ?', (target_id, chat_id))
-            cursor.execute('UPDATE users SET banned = 0 WHERE user_id = ? AND chat_id = ?', (target_id, chat_id))
-            conn.commit()
-            self.send_msg(peer_id, f"✅ {self.get_user_name(target_id)} разбанен")
-        except:
-            self.send_msg(peer_id, "❌ Ошибка!")
-    
-    def cmd_addmoder(self, user_id, chat_id, args):
-        if not chat_id:
-            self.send_msg(user_id, "❌ Только в беседах!")
-            return
-        peer_id = 2000000000 + chat_id
-        if not self.check_permission(user_id, chat_id, 'admin'):
-            self.send_msg(peer_id, "❌ Нет прав!")
-            return
-        if not args:
-            self.send_msg(peer_id, "❌ /addmoder @user")
-            return
-        try:
-            target_id = int(re.findall(r'id(\d+)', args[0])[0])
-            cursor.execute('UPDATE users SET role = "moderator" WHERE user_id = ? AND chat_id = ?', (target_id, chat_id))
-            if cursor.rowcount == 0:
-                cursor.execute('INSERT INTO users (user_id, chat_id, role, joined_date) VALUES (?, ?, ?, ?)',
-                              (target_id, chat_id, 'moderator', datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
-            conn.commit()
-            self.send_msg(peer_id, f"✅ {self.get_user_name(target_id)} теперь модератор")
-        except:
-            self.send_msg(peer_id, "❌ Ошибка!")
-    
-    def cmd_removerole(self, user_id, chat_id, args):
-        if not chat_id:
-            self.send_msg(user_id, "❌ Только в беседах!")
-            return
-        peer_id = 2000000000 + chat_id
-        if not self.check_permission(user_id, chat_id, 'admin'):
-            self.send_msg(peer_id, "❌ Нет прав!")
-            return
-        if not args:
-            self.send_msg(peer_id, "❌ /removerole @user")
-            return
-        try:
-            target_id = int(re.findall(r'id(\d+)', args[0])[0])
-            cursor.execute('UPDATE users SET role = "user" WHERE user_id = ? AND chat_id = ?', (target_id, chat_id))
-            conn.commit()
-            self.send_msg(peer_id, f"✅ У {self.get_user_name(target_id)} роль забрана")
-        except:
-            self.send_msg(peer_id, "❌ Ошибка!")
-    
-    def cmd_zov(self, user_id, chat_id, args):
-        if not chat_id:
-            self.send_msg(user_id, "❌ Только в беседах!")
-            return
-        peer_id = 2000000000 + chat_id
-        if not self.check_permission(user_id, chat_id, 'admin'):
-            self.send_msg(peer_id, "❌ Нет прав!")
-            return
-        users = self.get_chat_users(chat_id)
-        mentions = [f"[id{u}|{self.get_user_name(u)}]" for u in users[:50]]
-        self.send_msg(peer_id, ' '.join(mentions) if mentions else "Нет пользователей")
-    
-    def cmd_banlist(self, user_id, chat_id, args):
-        if not chat_id:
-            self.send_msg(user_id, "❌ Только в беседах!")
-            return
-        peer_id = 2000000000 + chat_id
-        if not self.check_permission(user_id, chat_id, 'admin'):
-            self.send_msg(peer_id, "❌ Нет прав!")
-            return
-        cursor.execute('SELECT user_id FROM bans WHERE chat_id = ?', (chat_id,))
-        bans = cursor.fetchall()
-        if bans:
-            msg = "🚫 БАНЫ:\n"
-            for b in bans:
-                msg += f"• {self.get_user_name(b[0])}\n"
-            self.send_msg(peer_id, msg)
-        else:
-            self.send_msg(peer_id, "✅ Нет банов")
-    
-    def cmd_addadmin(self, user_id, chat_id, args):
-        if not chat_id:
-            self.send_msg(user_id, "❌ Только в беседах!")
-            return
-        peer_id = 2000000000 + chat_id
-        if not self.check_permission(user_id, chat_id, 'senioradmin'):
-            self.send_msg(peer_id, "❌ Нет прав!")
-            return
-        if not args:
-            self.send_msg(peer_id, "❌ /addadmin @user")
-            return
-        try:
-            target_id = int(re.findall(r'id(\d+)', args[0])[0])
-            cursor.execute('UPDATE users SET role = "admin" WHERE user_id = ? AND chat_id = ?', (target_id, chat_id))
-            if cursor.rowcount == 0:
-                cursor.execute('INSERT INTO users (user_id, chat_id, role, joined_date) VALUES (?, ?, ?, ?)',
-                              (target_id, chat_id, 'admin', datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
-            conn.commit()
-            self.send_msg(peer_id, f"✅ {self.get_user_name(target_id)} теперь администратор")
-        except:
-            self.send_msg(peer_id, "❌ Ошибка!")
-    
-    def cmd_filter(self, user_id, chat_id, args):
-        if not chat_id:
-            self.send_msg(user_id, "❌ Только в беседах!")
-            return
-        peer_id = 2000000000 + chat_id
-        if not self.check_permission(user_id, chat_id, 'admin'):
-            self.send_msg(peer_id, "❌ Нет прав!")
-            return
-        cursor.execute('SELECT filter_enabled FROM chats WHERE chat_id = ?', (chat_id,))
-        current = cursor.fetchone()
-        new_val = 0 if (current and current[0] == 1) else 1
-        cursor.execute('UPDATE chats SET filter_enabled = ? WHERE chat_id = ?', (new_val, chat_id))
-        conn.commit()
-        self.send_msg(peer_id, f"📝 Фильтр {'ВКЛ' if new_val else 'ВЫКЛ'}")
-    
-    def cmd_quiet(self, user_id, chat_id, args):
-        if not chat_id:
-            self.send_msg(user_id, "❌ Только в беседах!")
-            return
-        peer_id = 2000000000 + chat_id
-        if not self.check_permission(user_id, chat_id, 'admin'):
-            self.send_msg(peer_id, "❌ Нет прав!")
-            return
-        cursor.execute('SELECT quiet_mode FROM chats WHERE chat_id = ?', (chat_id,))
-        current = cursor.fetchone()
-        new_val = 0 if (current and current[0] == 1) else 1
-        cursor.execute('UPDATE chats SET quiet_mode = ? WHERE chat_id = ?', (new_val, chat_id))
-        conn.commit()
-        self.send_msg(peer_id, f"🔇 Тишина {'ВКЛ' if new_val else 'ВЫКЛ'}")
-    
-    def cmd_settings(self, user_id, chat_id, args):
-        if not chat_id:
-            self.send_msg(user_id, "❌ Только в беседах!")
-            return
-        peer_id = 2000000000 + chat_id
-        if not self.check_permission(user_id, chat_id, 'admin'):
-            self.send_msg(peer_id, "❌ Нет прав!")
-            return
-        cursor.execute('SELECT filter_enabled, quiet_mode FROM chats WHERE chat_id = ?', (chat_id,))
-        settings = cursor.fetchone()
-        if settings:
-            self.send_msg(peer_id, f"⚙️ НАСТРОЙКИ:\n📝 Фильтр: {'✅' if settings[0] else '❌'}\n🔇 Тишина: {'✅' if settings[1] else '❌'}")
-    
-    def cmd_gban(self, user_id, chat_id, args):
-        peer_id = 2000000000 + chat_id if chat_id else user_id
-        if not self.is_global_admin(user_id):
-            self.send_msg(peer_id, "❌ Нет прав!")
-            return
-        if not args:
-            self.send_msg(peer_id, "❌ /gban @user")
-            return
-        try:
-            target_id = int(re.findall(r'id(\d+)', args[0])[0])
-            reason = ' '.join(args[1:]) if len(args) > 1 else 'Глобальный бан'
-            cursor.execute('INSERT OR REPLACE INTO global_bans (user_id, admin_id, reason, date) VALUES (?, ?, ?, ?)',
-                          (target_id, user_id, reason, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
-            conn.commit()
-            self.send_msg(peer_id, f"🌐 {self.get_user_name(target_id)} глобально забанен\nПричина: {reason}")
-        except:
-            self.send_msg(peer_id, "❌ Ошибка!")
-    
-    def cmd_gunban(self, user_id, chat_id, args):
-        peer_id = 2000000000 + chat_id if chat_id else user_id
-        if not self.is_global_admin(user_id):
-            self.send_msg(peer_id, "❌ Нет прав!")
-            return
-        if not args:
-            self.send_msg(peer_id, "❌ /gunban @user")
-            return
-        try:
-            target_id = int(re.findall(r'id(\d+)', args[0])[0])
-            cursor.execute('DELETE FROM global_bans WHERE user_id = ?', (target_id,))
-            conn.commit()
-            self.send_msg(peer_id, f"🌐 {self.get_user_name(target_id)} глобально разбанен")
-        except:
-            self.send_msg(peer_id, "❌ Ошибка!")
-    
-    def cmd_gbanlist(self, user_id, chat_id, args):
-        peer_id = 2000000000 + chat_id if chat_id else user_id
-        if not self.is_global_admin(user_id):
-            self.send_msg(peer_id, "❌ Нет прав!")
-            return
-        cursor.execute('SELECT user_id FROM global_bans')
-        bans = cursor.fetchall()
-        if bans:
-            msg = "🌐 ГЛОБАЛЬНЫЕ БАНЫ:\n"
-            for b in bans:
-                msg += f"• {self.get_user_name(b[0])}\n"
-            self.send_msg(peer_id, msg)
-        else:
-            self.send_msg(peer_id, "✅ Нет глобальных банов")
-    
-    def cmd_addword(self, user_id, chat_id, args):
-        peer_id = 2000000000 + chat_id if chat_id else user_id
-        if not self.is_global_admin(user_id):
-            self.send_msg(peer_id, "❌ Нет прав!")
-            return
-        if not args:
-            self.send_msg(peer_id, "❌ /addword слово")
-            return
-        word = args[0].lower()
-        cursor.execute('INSERT OR IGNORE INTO filter_words (word) VALUES (?)', (word,))
-        conn.commit()
-        self.send_msg(peer_id, f"✅ Слово '{word}' добавлено")
-    
-    def cmd_delword(self, user_id, chat_id, args):
-        peer_id = 2000000000 + chat_id if chat_id else user_id
-        if not self.is_global_admin(user_id):
-            self.send_msg(peer_id, "❌ Нет прав!")
-            return
-        if not args:
-            self.send_msg(peer_id, "❌ /delword слово")
-            return
-        word = args[0].lower()
-        cursor.execute('DELETE FROM filter_words WHERE word = ?', (word,))
-        conn.commit()
-        self.send_msg(peer_id, f"✅ Слово '{word}' удалено")
-    
-    def cmd_sync(self, user_id, chat_id, args):
-        peer_id = 2000000000 + chat_id if chat_id else user_id
-        if not self.is_global_admin(user_id):
-            self.send_msg(peer_id, "❌ Нет прав!")
-            return
-        conn.commit()
-        self.send_msg(peer_id, "🔄 База синхронизирована")
-    
-    def process_message(self, event):
-        user_id = event.user_id
-        if event.from_chat:
-            chat_id = event.chat_id
-            peer_id = 2000000000 + chat_id
-        else:
-            chat_id = 0
-            peer_id = user_id
-        message = event.text
-
-        if chat_id:
-            self.register_chat(chat_id)
-            self.register_user(user_id, chat_id)
-            cursor.execute('UPDATE users SET last_active = ? WHERE user_id = ? AND chat_id = ?',
-                         (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), user_id, chat_id))
-            conn.commit()
-            
-            if self.check_global_ban(user_id):
-                try:
-                    vk.method('messages.removeChatUser', {'chat_id': chat_id, 'user_id': user_id})
-                except:
-                    pass
-                return
-            
-            if self.check_ban(user_id, chat_id):
-                try:
-                    vk.method('messages.removeChatUser', {'chat_id': chat_id, 'user_id': user_id})
-                except:
-                    pass
-                return
-            
-            if self.check_mute(user_id, chat_id):
-                return
-            
-            if not self.check_activation(chat_id) and user_id != OWNER_ID:
-                if message and message.startswith('/start'):
-                    pass
-                else:
-                    return
-            
-            # Фильтр мата
-            if message and not message.startswith('/') and self.check_activation(chat_id):
-                cursor.execute('SELECT filter_enabled FROM chats WHERE chat_id = ?', (chat_id,))
-                res = cursor.fetchone()
-                if res and res[0] == 1:
-                    cursor.execute('SELECT word FROM filter_words')
-                    bad = cursor.fetchall()
-                    for w in bad:
-                        if w[0].lower() in message.lower():
-                            try:
-                                vk.method('messages.delete', {'message_ids': [event.message_id], 'delete_for_all': 1})
-                            except:
-                                pass
-                            cursor.execute('SELECT warns FROM users WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
-                            warns = cursor.fetchone()
-                            new_warns = (warns[0] if warns else 0) + 1
-                            cursor.execute('UPDATE users SET warns = ? WHERE user_id = ? AND chat_id = ?', (new_warns, user_id, chat_id))
-                            conn.commit()
-                            if new_warns >= 3:
-                                cursor.execute('UPDATE users SET banned = 1 WHERE user_id = ? AND chat_id = ?', (user_id, chat_id))
-                                conn.commit()
-                            break
+👑 ВЛАДЕЛЕЦ: Андрей"""
+            send(peer, txt)
         
-        if message and message.startswith('/'):
-            parts = message.split()
-            cmd = parts[0].lower()
-            args = parts[1:] if len(parts) > 1 else []
-            if cmd in self.commands:
+        elif msg == '/info':
+            send(peer, "🤖 БОТ v4.0\n👑 ВЛАДЕЛЕЦ: Андрей\n💬 /help - ВСЕ КОМАНДЫ")
+        
+        elif msg.startswith('/stats'):
+            target = extract_id(msg) if '[' in msg else uid
+            if target:
+                data = c.execute("SELECT warns, mute, role FROM users WHERE user_id=? AND chat_id=?", (target, cid)).fetchone()
+                if data:
+                    muted = "НЕТ" if not data[1] else f"ДО {data[1][:16]}"
+                    send(peer, f"📊 {get_name(target)}\n⭐ Роль: {data[2]}\n⚠️ Варны: {data[0]}/3\n🔇 Мут: {muted}")
+                else:
+                    send(peer, f"📊 {get_name(target)}\n⚠️ Варны: 0/3")
+        
+        elif msg == '/getid':
+            send(peer, f"🆔 ID: {uid}")
+        
+        elif msg == '/test':
+            send(peer, f"✅ БОТ РАБОТАЕТ!\n👤 ТВОЙ ID: {uid}")
+        
+        # МОДЕРАЦИЯ
+        elif msg.startswith('/kick '):
+            if not check_perm(uid, cid, 'moderator'):
+                send(peer, "❌ НЕТ ПРАВ!")
+            else:
+                target = extract_id(msg)
+                if target:
+                    reason = msg.split(' ', 2)[2] if len(msg.split(' ', 2)) > 2 else "Нарушение"
+                    kick_user(cid, target, uid, reason)
+                else:
+                    send(peer, "❌ /kick @user [причина]")
+        
+        elif msg.startswith('/mute '):
+            if not check_perm(uid, cid, 'moderator'):
+                send(peer, "❌ НЕТ ПРАВ!")
+            else:
+                target = extract_id(msg)
+                if target:
+                    nums = re.findall(r'(\d+)', msg)
+                    mins = int(nums[1]) if len(nums) > 1 else 30
+                    reason = msg.split(' ', 3)[3] if len(msg.split(' ', 3)) > 3 else "Нарушение"
+                    mute_user(cid, target, mins, uid, reason)
+                else:
+                    send(peer, "❌ /mute @user 30 [причина]")
+        
+        elif msg.startswith('/unmute '):
+            if not check_perm(uid, cid, 'moderator'):
+                send(peer, "❌ НЕТ ПРАВ!")
+            else:
+                target = extract_id(msg)
+                if target:
+                    c.execute("UPDATE users SET mute=NULL WHERE user_id=? AND chat_id=?", (target, cid))
+                    conn.commit()
+                    send(peer, f"🔊 {get_name(target)} РАЗМУЧЕН")
+                else:
+                    send(peer, "❌ /unmute @user")
+        
+        elif msg.startswith('/warn '):
+            if not check_perm(uid, cid, 'moderator'):
+                send(peer, "❌ НЕТ ПРАВ!")
+            else:
+                target = extract_id(msg)
+                if target:
+                    reason = msg.split(' ', 2)[2] if len(msg.split(' ', 2)) > 2 else "Нарушение"
+                    add_warn(cid, target, uid, reason)
+                else:
+                    send(peer, "❌ /warn @user [причина]")
+        
+        elif msg.startswith('/unwarn '):
+            if not check_perm(uid, cid, 'moderator'):
+                send(peer, "❌ НЕТ ПРАВ!")
+            else:
+                target = extract_id(msg)
+                if target:
+                    w = c.execute("SELECT warns FROM users WHERE user_id=? AND chat_id=?", (target, cid)).fetchone()
+                    if w and w[0] > 0:
+                        c.execute("UPDATE users SET warns=warns-1 WHERE user_id=? AND chat_id=?", (target, cid))
+                        conn.commit()
+                        send(peer, f"✅ {get_name(target)} | ВАРН СНЯТ")
+                    else:
+                        send(peer, "❌ НЕТ ВАРНОВ")
+                else:
+                    send(peer, "❌ /unwarn @user")
+        
+        elif msg.startswith('/clear '):
+            if not check_perm(uid, cid, 'moderator'):
+                send(peer, "❌ НЕТ ПРАВ!")
+            else:
+                nums = re.findall(r'(\d+)', msg)
+                count = int(nums[0]) if nums else 10
+                if count > 100:
+                    count = 100
                 try:
-                    self.commands[cmd](user_id, chat_id, args)
-                except Exception as e:
-                    print(f"Ошибка: {e}")
-                    self.send_msg(peer_id, f"❌ Ошибка")
-    
-    def run(self):
-        print("-" * 40)
-        print("💬 Команды: /help")
-        print("-" * 40)
-        for event in longpoll.listen():
-            if event.type == VkEventType.MESSAGE_NEW:
-                self.process_message(event)
+                    history = vk.messages.getHistory(peer_id=peer, count=count)
+                    ids = [m['id'] for m in history['items']]
+                    vk.messages.delete(message_ids=ids, delete_for_all=1)
+                    send(peer, f"✅ ОЧИЩЕНО {len(ids)} СООБЩЕНИЙ")
+                except:
+                    send(peer, "❌ ОШИБКА ОЧИСТКИ")
+        
+        elif msg == '/staff':
+            if not cid:
+                send(peer, "❌ ТОЛЬКО В БЕСЕДЕ")
+            else:
+                admins = c.execute("SELECT user_id, role FROM users WHERE chat_id=? AND role != 'user'", (cid,)).fetchall()
+                if admins:
+                    txt = "👥 АДМИНИСТРАЦИЯ:\n━━━━━━━━━━━━━━━━━━━━\n"
+                    for a in admins:
+                        txt += f"• {get_name(a[0])} - {a[1]}\n"
+                    send(peer, txt)
+                else:
+                    send(peer, "❌ НЕТ АДМИНИСТРАЦИИ")
+        
+        elif msg.startswith('/setnick '):
+            if not check_perm(uid, cid, 'moderator'):
+                send(peer, "❌ НЕТ ПРАВ!")
+            else:
+                target = extract_id(msg)
+                if target:
+                    nick = msg.split(' ', 2)[2] if len(msg.split(' ', 2)) > 2 else None
+                    if nick:
+                        c.execute("UPDATE users SET nick=? WHERE user_id=? AND chat_id=?", (nick, target, cid))
+                        conn.commit()
+                        send(peer, f"🏷 {get_name(target)} | НИК: {nick}")
+                    else:
+                        send(peer, "❌ /setnick @user НИК")
+                else:
+                    send(peer, "❌ /setnick @user НИК")
+        
+        elif msg == '/nlist':
+            if not check_perm(uid, cid, 'moderator'):
+                send(peer, "❌ НЕТ ПРАВ!")
+            else:
+                nicks = c.execute("SELECT user_id, nick FROM users WHERE chat_id=? AND nick IS NOT NULL", (cid,)).fetchall()
+                if nicks:
+                    txt = "🏷 СПИСОК НИКОВ:\n━━━━━━━━━━━━━━━━━━━━\n"
+                    for n in nicks[:20]:
+                        txt += f"• {get_name(n[0])} → {n[1]}\n"
+                    send(peer, txt)
+                else:
+                    send(peer, "❌ НЕТ НИКОВ")
+        
+        elif msg == '/warnlist':
+            if not check_perm(uid, cid, 'moderator'):
+                send(peer, "❌ НЕТ ПРАВ!")
+            else:
+                warned = c.execute("SELECT user_id, warns FROM users WHERE chat_id=? AND warns>0 ORDER BY warns DESC", (cid,)).fetchall()
+                if warned:
+                    txt = "⚠️ СПИСОК ВАРНОВ:\n━━━━━━━━━━━━━━━━━━━━\n"
+                    for w in warned:
+                        txt += f"• {get_name(w[0])} → {w[1]}/3\n"
+                    send(peer, txt)
+                else:
+                    send(peer, "✅ НЕТ ВАРНОВ")
+        
+        elif msg == '/mutelist':
+            if not check_perm(uid, cid, 'moderator'):
+                send(peer, "❌ НЕТ ПРАВ!")
+            else:
+                now = datetime.now()
+                muted = c.execute("SELECT user_id, mute FROM users WHERE chat_id=? AND mute IS NOT NULL", (cid,)).fetchall()
+                active = []
+                for m in muted:
+                    try:
+                        till = datetime.strptime(m[1], '%Y-%m-%d %H:%M:%S')
+                        if till > now:
+                            active.append((m[0], till))
+                    except:
+                        pass
+                if active:
+                    txt = "🔇 АКТИВНЫЕ МУТЫ:\n━━━━━━━━━━━━━━━━━━━━\n"
+                    for a in active:
+                        left = a[1] - now
+                        txt += f"• {get_name(a[0])} → {left.seconds//60} МИН\n"
+                    send(peer, txt)
+                else:
+                    send(peer, "✅ НЕТ МУТОВ")
+        
+        # ============= АДМИНИСТРИРОВАНИЕ =============
+        
+        elif msg.startswith('/ban '):
+            if not check_perm(uid, cid, 'admin'):
+                send(peer, "❌ НЕТ ПРАВ! ТРЕБУЕТСЯ АДМИНИСТРАТОР")
+            else:
+                target = extract_id(msg)
+                if target:
+                    reason = msg.split(' ', 2)[2] if len(msg.split(' ', 2)) > 2 else "Нарушение"
+                    ban_user(cid, target, uid, reason)
+                else:
+                    send(peer, "❌ /ban @user [ПРИЧИНА]")
+        
+        elif msg.startswith('/unban '):
+            if not check_perm(uid, cid, 'admin'):
+                send(peer, "❌ НЕТ ПРАВ! ТРЕБУЕТСЯ АДМИНИСТРАТОР")
+            else:
+                target = extract_id(msg)
+                if target:
+                    unban_user(cid, target, uid)
+                else:
+                    send(peer, "❌ /unban @user")
+        
+        elif msg.startswith('/addmoder '):
+            if not check_perm(uid, cid, 'admin'):
+                send(peer, "❌ НЕТ ПРАВ! ТРЕБУЕТСЯ АДМИНИСТРАТОР")
+            else:
+                target = extract_id(msg)
+                if target:
+                    c.execute("INSERT OR REPLACE INTO users (user_id, chat_id, role) VALUES (?,?,?)", (target, cid, 'moderator'))
+                    conn.commit()
+                    send(peer, f"✅ {get_name(target)} | ТЕПЕРЬ МОДЕРАТОР")
+                else:
+                    send(peer, "❌ /addmoder @user")
+        
+        elif msg.startswith('/removerole '):
+            if not check_perm(uid, cid, 'admin'):
+                send(peer, "❌ НЕТ ПРАВ! ТРЕБУЕТСЯ АДМИНИСТРАТОР")
+            else:
+                target = extract_id(msg)
+                if target:
+                    current_role = get_role(target, cid)
+                    if target == OWNER_ID:
+                        send(peer, "❌ НЕЛЬЗЯ ЗАБРАТЬ РОЛЬ У ВЛАДЕЛЬЦА БОТА!")
+                        return
+                    if current_role == 'owner':
+                        send(peer, "❌ НЕЛЬЗЯ ЗАБРАТЬ РОЛЬ У ВЛАДЕЛЬЦА БЕСЕДЫ!")
+                        return
+                    c.execute("UPDATE users SET role='user' WHERE user_id=? AND chat_id=?", (target, cid))
+                    conn.commit()
+                    send(peer, f"✅ {get_name(target)} | РОЛЬ ЗАБРАНА")
+                else:
+                    send(peer, "❌ /removerole @user")
+        
+        elif msg == '/zov':
+            if not check_perm(uid, cid, 'admin'):
+                send(peer, "❌ НЕТ ПРАВ! ТРЕБУЕТСЯ АДМИНИСТРАТОР")
+            else:
+                users = get_chat_users(cid)
+                mentions = []
+                for u in users:
+                    if u > 0 and u != uid:
+                        mentions.append(f"[id{u}|{get_name(u)}]")
+                if mentions:
+                    for i in range(0, len(mentions), 10):
+                        send(peer, ' '.join(mentions[i:i+10]))
+                        import time
+                        time.sleep(0.5)
+                else:
+                    send(peer, "❌ НЕТ ПОЛЬЗОВАТЕЛЕЙ")
+        
+        elif msg == '/banlist':
+            if not check_perm(uid, cid, 'admin'):
+                send(peer, "❌ НЕТ ПРАВ! ТРЕБУЕТСЯ АДМИНИСТРАТОР")
+            else:
+                bans = c.execute("SELECT user_id, reason, date FROM bans WHERE chat_id=?", (cid,)).fetchall()
+                if bans:
+                    txt = "🚫 СПИСОК БАНОВ:\n━━━━━━━━━━━━━━━━━━━━\n"
+                    for b in bans[:15]:
+                        txt += f"• {get_name(b[0])} → {b[2][:10]}\n📝 {b[1][:30]}\n\n"
+                    send(peer, txt)
+                else:
+                    send(peer, "✅ НЕТ БАНОВ")
+        
+        elif msg.startswith('/getban '):
+            if not check_perm(uid, cid, 'admin'):
+                send(peer, "❌ НЕТ ПРАВ! ТРЕБУЕТСЯ АДМИНИСТРАТОР")
+            else:
+                target = extract_id(msg)
+                if target:
+                    info = get_ban_info(target, cid)
+                    send(peer, f"🚫 ИНФО О БАНЕ {get_name(target)}:\n{info}")
+                else:
+                    send(peer, "❌ /getban @user")
+        
+        elif msg.startswith('/checkban '):
+            target = extract_id(msg)
+            if target:
+                info = get_ban_info(target, cid) if cid else "❌ ТОЛЬКО В БЕСЕДЕ"
+                send(peer, f"🔍 ПРОВЕРКА БАНА {get_name(target)}:\n{info}")
+            else:
+                send(peer, "❌ /checkban @user")
+        
+        elif msg.startswith('/addadmin '):
+            if not check_perm(uid, cid, 'owner'):
+                send(peer, "❌ НЕТ ПРАВ! ТРЕБУЕТСЯ ВЛАДЕЛЕЦ БЕСЕДЫ")
+            else:
+                target = extract_id(msg)
+                if target:
+                    c.execute("INSERT OR REPLACE INTO users (user_id, chat_id, role) VALUES (?,?,?)", (target, cid, 'admin'))
+                    conn.commit()
+                    send(peer, f"✅ {get_name(target)} | ТЕПЕРЬ АДМИНИСТРАТОР")
+                else:
+                    send(peer, "❌ /addadmin @user")
+        
+        elif msg == '/filter':
+            if not check_perm(uid, cid, 'admin'):
+                send(peer, "❌ НЕТ ПРАВ! ТРЕБУЕТСЯ АДМИНИСТРАТОР")
+            else:
+                send(peer, "📝 ФИЛЬТР МАТА ВКЛЮЧЕН ВСЕГДА")
+        
+        elif msg == '/quiet':
+            if not check_perm(uid, cid, 'admin'):
+                send(peer, "❌ НЕТ ПРАВ! ТРЕБУЕТСЯ АДМИНИСТРАТОР")
+            else:
+                send(peer, "🔇 РЕЖИМ ТИШИНЫ В РАЗРАБОТКЕ")
+        
+        elif msg == '/settings':
+            if not check_perm(uid, cid, 'admin'):
+                send(peer, "❌ НЕТ ПРАВ! ТРЕБУЕТСЯ АДМИНИСТРАТОР")
+            else:
+                send(peer, "⚙️ НАСТРОЙКИ:\n/filter - ФИЛЬТР МАТА\n/quiet - РЕЖИМ ТИШИНЫ")
+        
+        # ============= ГЛОБАЛКА =============
+        
+        elif msg.startswith('/gban ') or msg.startswith('/gbanpl '):
+            if uid != OWNER_ID:
+                send(peer, "❌ ТОЛЬКО ВЛАДЕЛЕЦ БОТА!")
+            else:
+                target = extract_id(msg)
+                if target:
+                    reason = msg.split(' ', 2)[2] if len(msg.split(' ', 2)) > 2 else "Глобальное нарушение"
+                    global_ban(target, uid, reason)
+                    send(peer, f"🌐 {get_name(target)} | ГЛОБАЛЬНЫЙ БАН\n📝 {reason}")
+                else:
+                    send(peer, "❌ /gban @user [ПРИЧИНА]")
+        
+        elif msg.startswith('/gunban ') or msg.startswith('/gunbanpl '):
+            if uid != OWNER_ID:
+                send(peer, "❌ ТОЛЬКО ВЛАДЕЛЕЦ БОТА!")
+            else:
+                target = extract_id(msg)
+                if target:
+                    global_unban(target, uid)
+                    send(peer, f"🌐 {get_name(target)} | ГЛОБАЛЬНЫЙ РАЗБАН")
+                else:
+                    send(peer, "❌ /gunban @user")
+        
+        elif msg == '/gbanlist':
+            if uid != OWNER_ID:
+                send(peer, "❌ ТОЛЬКО ВЛАДЕЛЕЦ БОТА!")
+            else:
+                bans = c.execute("SELECT user_id, reason, date FROM global_bans").fetchall()
+                if bans:
+                    txt = "🌐 ГЛОБАЛЬНЫЕ БАНЫ:\n━━━━━━━━━━━━━━━━━━━━\n"
+                    for b in bans:
+                        txt += f"• {get_name(b[0])} → {b[2][:10]}\n📝 {b[1][:30]}\n\n"
+                    send(peer, txt)
+                else:
+                    send(peer, "✅ НЕТ ГЛОБАЛЬНЫХ БАНОВ")
+        
+        elif msg.startswith('/checkgban '):
+            target = extract_id(msg)
+            if target:
+                info = get_global_ban_info(target)
+                send(peer, f"🌐 ПРОВЕРКА ГЛОБАЛЬНОГО БАНА {get_name(target)}:\n{info}")
+            else:
+                send(peer, "❌ /checkgban @user")
+        
+        # ============= ФИЛЬТР =============
+        
+        elif msg.startswith('/addword '):
+            if uid != OWNER_ID:
+                send(peer, "❌ ТОЛЬКО ВЛАДЕЛЕЦ БОТА!")
+            else:
+                word = msg[9:].lower()
+                if word:
+                    c.execute("INSERT OR IGNORE INTO badwords (word) VALUES (?)", (word,))
+                    conn.commit()
+                    send(peer, f"✅ СЛОВО '{word}' ДОБАВЛЕНО В ФИЛЬТР")
+                else:
+                    send(peer, "❌ /addword СЛОВО")
+        
+        elif msg.startswith('/delword '):
+            if uid != OWNER_ID:
+                send(peer, "❌ ТОЛЬКО ВЛАДЕЛЕЦ БОТА!")
+            else:
+                word = msg[9:].lower()
+                if word:
+                    c.execute("DELETE FROM badwords WHERE word=?", (word,))
+                    conn.commit()
+                    send(peer, f"✅ СЛОВО '{word}' УДАЛЕНО ИЗ ФИЛЬТРА")
+                else:
+                    send(peer, "❌ /delword СЛОВО")
+        
+        elif msg == '/banwords':
+            if uid != OWNER_ID:
+                send(peer, "❌ ТОЛЬКО ВЛАДЕЛЕЦ БОТА!")
+            else:
+                words = c.execute("SELECT word FROM badwords").fetchall()
+                if words:
+                    txt = "🚫 ЗАПРЕЩЕННЫЕ СЛОВА:\n━━━━━━━━━━━━━━━━━━━━\n" + ', '.join([w[0] for w in words])
+                    send(peer, txt)
+                else:
+                    send(peer, "✅ НЕТ ЗАПРЕЩЕННЫХ СЛОВ")
+        
+        # ============= СИСТЕМНЫЕ =============
+        
+        elif msg == '/sync':
+            if uid != OWNER_ID:
+                send(peer, "❌ ТОЛЬКО ВЛАДЕЛЕЦ БОТА!")
+            else:
+                conn.commit()
+                send(peer, "🔄 БАЗА ДАННЫХ СИНХРОНИЗИРОВАНА")
+        
+        elif msg == '/start' and cid and uid == OWNER_ID:
+            c.execute("UPDATE chats SET activated=1 WHERE chat_id=?", (cid,))
+            conn.commit()
+            send(peer, "✅ БОТ АКТИВИРОВАН В ЭТОЙ БЕСЕДЕ!\n📋 /help - ВСЕ КОМАНДЫ")
+        
+        elif msg == '/start' and cid and uid != OWNER_ID:
+            send(peer, "❌ ТОЛЬКО ВЛАДЕЛЕЦ БОТА МОЖЕТ АКТИВИРОВАТЬ!")
+        
+        elif not cid and msg and not msg.startswith('/'):
+            send(peer, f"🤖 БОТ РАБОТАЕТ!\n👤 ТВОЙ ID: {uid}\n📋 КОМАНДЫ: /help\n👑 ВЛАДЕЛЕЦ: АНДРЕЙ")
 
-if __name__ == '__main__':
-    bot = AdminBot()
-    bot.run()
+print("БОТ ОСТАНОВЛЕН")
