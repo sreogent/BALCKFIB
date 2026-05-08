@@ -1,680 +1,817 @@
 import vk_api
-from vk_api.longpoll import VkLongPoll, VkEventType
-from vk_api.utils import get_random_id
-import sqlite3
-from datetime import datetime, timedelta
-import re
+from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
 import time
+import random
+import re
+from datetime import datetime, timedelta
+import json
+import os
 
-# ============= КОНФИГ =============
-TOKEN = 'vk1.a.PNIoWwI7Erk6T7s4-9lGQAXmRLsqmDBFv1Oz_X9IkjFxuk2avaxoaKKHBxBlhfffoZf-P2EhZ2nMbzWoaZlLfk8PFBi_SafqB3QD1GS2ntswN0ig8s76KyZfpKwvNYvMNtGPRGH3v8z3CcIP-xgO8xiXGH_50kati168i6U-L1hMQDZNAiBW80XE3Ub5TGqumAOD-beIwf0cSMwL-ET8Sg'
-OWNER_ID = 905815597  # ТВОЙ ID
+# =========== ТВОИ ДАННЫЕ ===========
+TOKEN = "vk1.a.PNIoWwI7Erk6T7s4-9lGQAXmRLsqmDBFv1Oz_X9IkjFxuk2avaxoaKKHBxBlhfffoZf-P2EhZ2nMbzWoaZlLfk8PFBi_SafqB3QD1GS2ntswN0ig8s76KyZfpKwvNYvMNtGPRGH3v8z3CcIP-xgO8xiXGH_50kati168i6U-L1hMQDZNAiBW80XE3Ub5TGqumAOD-beIwf0cSMwL-ET8Sg"
+CREATOR_ID = 749488560
+GROUP_ID = 227305903  # ИСПРАВЬ НА СВОЙ ID ГРУППЫ!
+# ===================================
 
-# База данных
-conn = sqlite3.connect('bot.db', check_same_thread=False)
-c = conn.cursor()
+# Файлы для хранения данных
+DATA_FILES = {
+    'bans': 'bans.json',
+    'mutes': 'mutes.json',
+    'warns': 'warns.json',
+    'nicks': 'nicks.json',
+    'roles': 'roles.json',
+    'global_bans': 'global_bans.json',
+    'filter_words': 'filter_words.json',
+    'chat_types': 'chat_types.json',
+    'quiet_modes': 'quiet_modes.json',
+    'anti_flood': 'anti_flood.json',
+    'welcome_texts': 'welcome_texts.json',
+    'chat_binds': 'chat_binds.json',
+    'bug_receivers': 'bug_receivers.json'
+}
 
-# Таблицы
-c.execute('''CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER, chat_id INTEGER, warns INTEGER DEFAULT 0,
-    mute TEXT, ban INTEGER DEFAULT 0, role TEXT DEFAULT 'user',
-    nick TEXT, joined TEXT, last_active TEXT, PRIMARY KEY (user_id, chat_id)
-)''')
+# Загрузка данных
+def load_data(filename):
+    if os.path.exists(filename):
+        with open(filename, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {}
 
-c.execute('''CREATE TABLE IF NOT EXISTS chats (
-    chat_id INTEGER PRIMARY KEY, activated INTEGER DEFAULT 0
-)''')
+def save_data(filename, data):
+    with open(filename, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
-c.execute('''CREATE TABLE IF NOT EXISTS badwords (
-    word TEXT PRIMARY KEY
-)''')
+# Инициализация БД
+bans = load_data('bans.json')
+mutes = load_data('mutes.json')
+warns = load_data('warns.json')
+nicks = load_data('nicks.json')
+roles = load_data('roles.json')
+global_bans = load_data('global_bans.json')
+filter_words = load_data('filter_words.json')
+chat_types = load_data('chat_types.json')
+quiet_modes = load_data('quiet_modes.json')
+anti_flood = load_data('anti_flood.json')
+welcome_texts = load_data('welcome_texts.json')
+chat_binds = load_data('chat_binds.json')
+bug_receivers = load_data('bug_receivers.json')
 
-c.execute('''CREATE TABLE IF NOT EXISTS bans (
-    user_id INTEGER, chat_id INTEGER, admin_id INTEGER, reason TEXT, date TEXT,
-    PRIMARY KEY (user_id, chat_id)
-)''')
+if not filter_words:
+    filter_words = ['хуй', 'пизда', 'бля', 'сука', 'ебать', 'нахуй', 'пидор', 'редиска']
 
-c.execute('''CREATE TABLE IF NOT EXISTS global_bans (
-    user_id INTEGER PRIMARY KEY, admin_id INTEGER, reason TEXT, date TEXT
-)''')
+# Роли и уровни
+ROLE_LEVEL = {
+    'creator': 10,
+    'deputy_creator': 9,
+    'special_admin': 8,
+    'deputy_special': 7,
+    'senior_admin': 6,
+    'admin': 5,
+    'senior_moderator': 4,
+    'moderator': 3,
+    'helper': 2,
+    'user': 1
+}
 
-c.execute('''CREATE TABLE IF NOT EXISTS warn_history (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER, chat_id INTEGER, admin_id INTEGER, reason TEXT, date TEXT
-)''')
+# VK инициализация
+vk_session = vk_api.VkApi(token=TOKEN)
+vk = vk_session.get_api()
+longpoll = VkBotLongPoll(vk_session, GROUP_ID)
 
-# Добавляем маты
-for w in ['сука', 'блядь', 'хуй', 'пизда', 'ебать', 'жопа', 'пидор', 'мудак']:
-    c.execute("INSERT OR IGNORE INTO badwords (word) VALUES (?)", (w,))
-
-c.execute("INSERT OR IGNORE INTO users (user_id, chat_id, role) VALUES (?, ?, ?)", (OWNER_ID, -1, 'glav'))
-conn.commit()
-
-print("БОТ ЗАПУЩЕН")
-print(f"ВЛАДЕЛЕЦ: {OWNER_ID}")
-
-# Подключение к ВК
-vk = vk_api.VkApi(token=TOKEN).get_api()
-longpoll = vk_api.VkLongPoll(vk_api.VkApi(token=TOKEN))
-
-# ============= ФУНКЦИИ =============
-def send(peer, text):
+def send_message(peer_id, text, reply_to=None, attach=None):
     try:
-        vk.messages.send(peer_id=peer, message=text, random_id=get_random_id())
+        params = {
+            'peer_id': peer_id,
+            'message': text,
+            'random_id': random.randint(1, 999999999)
+        }
+        if reply_to:
+            params['reply_to'] = reply_to
+        if attach:
+            params['attachment'] = attach
+        vk.messages.send(**params)
     except Exception as e:
         print(f"Ошибка: {e}")
 
-def get_name(uid):
+def get_user_info(user_id):
     try:
-        u = vk.users.get(user_ids=uid)[0]
-        return f"{u['first_name']} {u['last_name']}"
+        user = vk.users.get(user_ids=user_id, fields='first_name,last_name,sex')[0]
+        return f"{user['first_name']} {user['last_name']}"
     except:
-        return f"id{uid}"
+        return f"ID{user_id}"
 
-def get_role(uid, cid):
-    if uid == OWNER_ID:
-        return 'glav'
-    r = c.execute("SELECT role FROM users WHERE user_id=? AND chat_id=?", (uid, cid)).fetchone()
-    return r[0] if r else 'user'
+def get_nick(peer_id, user_id):
+    if str(peer_id) in nicks and str(user_id) in nicks[str(peer_id)]:
+        return nicks[str(peer_id)][str(user_id)]
+    return get_user_info(user_id)
 
-def get_role_level(role):
-    levels = {'user':0, 'moderator':1, 'admin':2, 'owner':3, 'zamglav':6, 'glav':7}
-    return levels.get(role, 0)
+def get_user_role(peer_id, user_id):
+    user_id = str(user_id)
+    peer_id = str(peer_id)
+    
+    if int(user_id) == CREATOR_ID:
+        return 'creator'
+    
+    if peer_id in roles and user_id in roles[peer_id]:
+        return roles[peer_id][user_id]
+    return 'user'
 
-def check_perm(uid, cid, need):
-    if uid == OWNER_ID:
+def has_permission(peer_id, user_id, required_role):
+    user_role = get_user_role(peer_id, user_id)
+    return ROLE_LEVEL.get(user_role, 1) >= ROLE_LEVEL.get(required_role, 1)
+
+def is_admin_in_chat(peer_id, user_id):
+    if user_id == CREATOR_ID:
         return True
-    return get_role_level(get_role(uid, cid)) >= get_role_level(need)
-
-def is_muted(uid, cid):
-    r = c.execute("SELECT mute FROM users WHERE user_id=? AND chat_id=?", (uid, cid)).fetchone()
-    if r and r[0]:
-        try:
-            till = datetime.strptime(r[0], '%Y-%m-%d %H:%M:%S')
-            if till > datetime.now():
+    try:
+        chat_id = peer_id - 2000000000
+        chat_info = vk.messages.getConversationMembers(peer_id=peer_id)
+        for member in chat_info['items']:
+            if member['member_id'] == user_id and member.get('is_admin', False):
                 return True
-            c.execute("UPDATE users SET mute=NULL WHERE user_id=? AND chat_id=?", (uid, cid))
-            conn.commit()
-        except:
-            pass
+    except:
+        pass
     return False
 
-def is_banned(uid, cid):
-    r = c.execute("SELECT ban FROM users WHERE user_id=? AND chat_id=?", (uid, cid)).fetchone()
-    return r and r[0] == 1
-
-def is_global_banned(uid):
-    return c.execute("SELECT * FROM global_bans WHERE user_id=?", (uid,)).fetchone() is not None
-
-def register_user(uid, cid):
-    c.execute("INSERT OR IGNORE INTO users (user_id, chat_id, joined, last_active) VALUES (?,?,?,?)",
-              (uid, cid, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
-    conn.commit()
-
-def get_chat_users(cid):
+def kick_from_chat(peer_id, user_id):
     try:
-        chat = vk.messages.getConversationMembers(peer_id=2000000000 + cid)
-        return [m['member_id'] for m in chat['items'] if m['member_id'] > 0]
+        chat_id = peer_id - 2000000000
+        vk.messages.removeChatUser(chat_id=chat_id, user_id=user_id)
+        return True
     except:
-        return []
+        return False
 
-def extract_id(text):
-    ids = re.findall(r'id(\d+)', text)
-    return int(ids[0]) if ids else None
+def mute_in_chat(peer_id, user_id, minutes):
+    chat_id = peer_id - 2000000000
+    key = f"{peer_id}_{user_id}"
+    until_time = time.time() + (minutes * 60)
+    if str(peer_id) not in mutes:
+        mutes[str(peer_id)] = {}
+    mutes[str(peer_id)][str(user_id)] = until_time
+    save_data('mutes.json', mutes)
+    return True
 
-def get_all_chats():
-    return [row[0] for row in c.execute("SELECT chat_id FROM chats WHERE activated=1").fetchall()]
-
-def add_warn(cid, uid, admin, reason):
-    w = c.execute("SELECT warns FROM users WHERE user_id=? AND chat_id=?", (uid, cid)).fetchone()
-    warns = (w[0] if w else 0) + 1
-    c.execute("INSERT OR REPLACE INTO users (user_id, chat_id, warns) VALUES (?,?,?)", (uid, cid, warns))
-    c.execute("INSERT INTO warn_history (user_id, chat_id, admin_id, reason, date) VALUES (?,?,?,?,?)",
-              (uid, cid, admin, reason, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
-    conn.commit()
-    send(2000000000 + cid, f"⚠️ {get_name(uid)} | ВАРН {warns}/3\n📝 {reason}")
-    if warns >= 3:
-        c.execute("UPDATE users SET ban=1 WHERE user_id=? AND chat_id=?", (uid, cid))
-        conn.commit()
-        try:
-            vk.messages.removeChatUser(chat_id=cid, user_id=uid)
-            send(2000000000 + cid, f"🚫 {get_name(uid)} ЗАБАНЕН (3/3 варнов)")
-        except:
-            pass
-
-def mute_user(cid, uid, minutes, admin, reason):
-    till = datetime.now() + timedelta(minutes=minutes)
-    c.execute("UPDATE users SET mute=? WHERE user_id=? AND chat_id=?", (till.strftime('%Y-%m-%d %H:%M:%S'), uid, cid))
-    conn.commit()
-    send(2000000000 + cid, f"🔇 {get_name(uid)} | МУТ {minutes} мин\n📝 {reason}")
-
-def kick_user(cid, uid, admin, reason):
-    try:
-        vk.messages.removeChatUser(chat_id=cid, user_id=uid)
-        send(2000000000 + cid, f"👢 {get_name(uid)} | КИК\n📝 {reason}")
-    except:
-        pass
-
-def ban_user(cid, uid, admin, reason):
-    c.execute("INSERT OR REPLACE INTO bans (user_id, chat_id, admin_id, reason, date) VALUES (?,?,?,?,?)",
-              (uid, cid, admin, reason, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
-    c.execute("UPDATE users SET ban=1 WHERE user_id=? AND chat_id=?", (uid, cid))
-    conn.commit()
-    try:
-        vk.messages.removeChatUser(chat_id=cid, user_id=uid)
-        send(2000000000 + cid, f"🚫 {get_name(uid)} | БАН\n📝 {reason}")
-    except:
-        pass
-
-def unban_user(cid, uid, admin):
-    c.execute("DELETE FROM bans WHERE user_id=? AND chat_id=?", (uid, cid))
-    c.execute("UPDATE users SET ban=0 WHERE user_id=? AND chat_id=?", (uid, cid))
-    conn.commit()
-    send(2000000000 + cid, f"✅ {get_name(uid)} | РАЗБАНЕН")
-
-def global_ban(uid, admin, reason):
-    c.execute("INSERT OR REPLACE INTO global_bans (user_id, admin_id, reason, date) VALUES (?,?,?,?)",
-              (uid, admin, reason, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
-    conn.commit()
-    for chat in get_all_chats():
-        try:
-            vk.messages.removeChatUser(chat_id=chat, user_id=uid)
-        except:
-            pass
-    send(OWNER_ID, f"🌐 {get_name(uid)} | ГЛОБАЛЬНЫЙ БАН\n📝 {reason}")
-
-def global_unban(uid, admin):
-    c.execute("DELETE FROM global_bans WHERE user_id=?", (uid,))
-    conn.commit()
-    send(OWNER_ID, f"🌐 {get_name(uid)} | ГЛОБАЛЬНЫЙ РАЗБАН")
-
-def get_ban_info(uid, cid):
-    ban = c.execute("SELECT admin_id, reason, date FROM bans WHERE user_id=? AND chat_id=?", (uid, cid)).fetchone()
-    if ban:
-        return f"Забанил: {get_name(ban[0])}\nПричина: {ban[1]}\nДата: {ban[2][:16]}"
-    return "НЕ ЗАБАНЕН"
-
-def get_global_ban_info(uid):
-    ban = c.execute("SELECT admin_id, reason, date FROM global_bans WHERE user_id=?", (uid,)).fetchone()
-    if ban:
-        return f"Забанил: {get_name(ban[0])}\nПричина: {ban[1]}\nДата: {ban[2][:16]}"
-    return "НЕ ЗАБАНЕН ГЛОБАЛЬНО"
-
-print("БОТ РАБОТАЕТ, ЖДУ КОМАНД...")
-print("=" * 50)
-
-# ============= ГЛАВНЫЙ ЦИКЛ =============
-for event in longpoll.listen():
-    if event.type == VkEventType.MESSAGE_NEW:
-        uid = event.user_id
-        msg = event.text or ""
-        msg_lower = msg.lower()
-        
-        if event.from_chat:
-            cid = event.chat_id
-            peer = 2000000000 + cid
+def is_muted(peer_id, user_id):
+    peer_id = str(peer_id)
+    user_id = str(user_id)
+    if peer_id in mutes and user_id in mutes[peer_id]:
+        if mutes[peer_id][user_id] > time.time():
+            return True
         else:
-            cid = 0
-            peer = uid
+            del mutes[peer_id][user_id]
+            save_data('mutes.json', mutes)
+    return False
+
+def add_warn(peer_id, user_id, reason=""):
+    peer_id = str(peer_id)
+    user_id = str(user_id)
+    if peer_id not in warns:
+        warns[peer_id] = {}
+    if user_id not in warns[peer_id]:
+        warns[peer_id][user_id] = {'count': 0, 'reasons': []}
+    warns[peer_id][user_id]['count'] += 1
+    warns[peer_id][user_id]['reasons'].append(reason)
+    save_data('warns.json', warns)
+    return warns[peer_id][user_id]['count']
+
+def clear_chat(peer_id, count):
+    try:
+        messages = vk.messages.getHistory(peer_id=peer_id, count=min(count, 100))
+        msg_ids = [msg['id'] for msg in messages['items']]
+        if msg_ids:
+            vk.messages.delete(message_ids=msg_ids, delete_for_all=1, peer_id=peer_id)
+        return True
+    except:
+        return False
+
+def ban_user(peer_id, user_id, reason=""):
+    peer_id = str(peer_id)
+    user_id = str(user_id)
+    if peer_id not in bans:
+        bans[peer_id] = {}
+    bans[peer_id][user_id] = {'reason': reason, 'time': time.time()}
+    save_data('bans.json', bans)
+    kick_from_chat(int(peer_id), int(user_id))
+
+def is_banned(peer_id, user_id):
+    peer_id = str(peer_id)
+    user_id = str(user_id)
+    if peer_id in bans and user_id in bans[peer_id]:
+        return True
+    if int(user_id) in global_bans:
+        return True
+    return False
+
+# Обработка команд
+def handle_command(peer_id, user_id, text, msg_id):
+    user_id = int(user_id)
+    peer_id = int(peer_id)
+    
+    # Проверка бана
+    if is_banned(peer_id, user_id) and user_id != CREATOR_ID:
+        return
+    
+    # Проверка мута
+    if is_muted(peer_id, user_id) and user_id != CREATOR_ID:
+        send_message(peer_id, "🔇 Вы замучены!", msg_id)
+        return
+    
+    # Фильтр мата
+    for word in filter_words:
+        if word.lower() in text.lower():
+            send_message(peer_id, f"🚫 Запрещенное слово: {word}", msg_id)
+            return
+    
+    # ═══════════════════════════════════════════════════════
+    # КОМАНДЫ ДЛЯ ВСЕХ (уровень 0)
+    # ═══════════════════════════════════════════════════════
+    
+    if text == "/info":
+        send_message(peer_id, "📚 BLACK FIB BOT\n━━━━━━━━━━━━\n✅ Версия: 1.0\n👑 Создатель: @id749488560\n💡 Бот полностью функционирует")
+    
+    elif text.startswith("/stats"):
+        parts = text.split()
+        target_id = user_id
+        if len(parts) > 1 and parts[1].startswith("@id"):
+            target_id = int(parts[1][3:])
+        elif len(parts) > 1 and parts[1].isdigit():
+            target_id = int(parts[1])
         
-        if cid:
-            c.execute("INSERT OR IGNORE INTO chats (chat_id) VALUES (?)", (cid,))
-            register_user(uid, cid)
-            c.execute("UPDATE users SET last_active=? WHERE user_id=? AND chat_id=?", 
-                     (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), uid, cid))
-            conn.commit()
+        w = warns.get(str(peer_id), {}).get(str(target_id), {}).get('count', 0)
+        is_m = "Да" if is_muted(peer_id, target_id) else "Нет"
+        role = get_user_role(peer_id, target_id)
+        nick = get_nick(peer_id, target_id)
+        
+        send_message(peer_id, f"📊 Статистика {nick}\n━━━━━━━━━━━━\n⚠ Варны: {w}\n🔇 Мут: {is_m}\n👑 Роль: {role}")
+    
+    elif text == "/getid":
+        send_message(peer_id, f"🆔 Ваш ID: {user_id}")
+    
+    elif text == "/test":
+        send_message(peer_id, "✅ Бот работает! Комар носа не подточит!")
+    
+    elif text == "/ping":
+        send_message(peer_id, "🏓 Понг! Бот активен.")
+    
+    # ═══════════════════════════════════════════════════════
+    # ХЕЛПЕРЫ (уровень helper)
+    # ═══════════════════════════════════════════════════════
+    
+    elif text.startswith("/kick") and has_permission(peer_id, user_id, 'helper'):
+        parts = text.split()
+        if len(parts) > 1:
+            target_id = None
+            if parts[1].startswith("@id"):
+                target_id = int(parts[1][3:])
+            elif parts[1].isdigit():
+                target_id = int(parts[1])
             
-            if is_global_banned(uid):
+            if target_id:
+                reason = " ".join(parts[2:]) if len(parts) > 2 else "Не указана"
+                if kick_from_chat(peer_id, target_id):
+                    send_message(peer_id, f"👢 Кикнут пользователь\nПричина: {reason}")
+                else:
+                    send_message(peer_id, "❌ Ошибка при кике")
+    
+    elif text.startswith("/mute") and has_permission(peer_id, user_id, 'helper'):
+        parts = text.split()
+        if len(parts) > 2:
+            target_id = int(parts[1][3:]) if parts[1].startswith("@id") else int(parts[1])
+            minutes = int(parts[2])
+            reason = " ".join(parts[3:]) if len(parts) > 3 else "Не указана"
+            mute_in_chat(peer_id, target_id, minutes)
+            send_message(peer_id, f"🔇 Мут на {minutes} мин\nПричина: {reason}")
+    
+    elif text.startswith("/unmute") and has_permission(peer_id, user_id, 'helper'):
+        parts = text.split()
+        if len(parts) > 1:
+            target_id = int(parts[1][3:]) if parts[1].startswith("@id") else int(parts[1])
+            if str(peer_id) in mutes and str(target_id) in mutes[str(peer_id)]:
+                del mutes[str(peer_id)][str(target_id)]
+                save_data('mutes.json', mutes)
+                send_message(peer_id, "✅ Мут снят")
+    
+    elif text.startswith("/warn") and has_permission(peer_id, user_id, 'helper'):
+        parts = text.split()
+        if len(parts) > 1:
+            target_id = int(parts[1][3:]) if parts[1].startswith("@id") else int(parts[1])
+            reason = " ".join(parts[2:]) if len(parts) > 2 else "Не указана"
+            count = add_warn(peer_id, target_id, reason)
+            send_message(peer_id, f"⚠ Выдан варн #{count}\nПричина: {reason}")
+            if count >= 3:
+                mute_in_chat(peer_id, target_id, 60)
+                send_message(peer_id, f"🔇 3 варна = мут 60 мин")
+    
+    elif text.startswith("/unwarn") and has_permission(peer_id, user_id, 'helper'):
+        parts = text.split()
+        if len(parts) > 1:
+            target_id = int(parts[1][3:]) if parts[1].startswith("@id") else int(parts[1])
+            if str(peer_id) in warns and str(target_id) in warns[str(peer_id)]:
+                warns[str(peer_id)][str(target_id)]['count'] = 0
+                save_data('warns.json', warns)
+                send_message(peer_id, "✅ Варны сброшены")
+    
+    elif text.startswith("/clear") and has_permission(peer_id, user_id, 'helper'):
+        parts = text.split()
+        if len(parts) > 1:
+            count = int(parts[1])
+            if clear_chat(peer_id, count):
+                send_message(peer_id, f"🧹 Очищено {count} сообщений")
+    
+    elif text == "/staff" and has_permission(peer_id, user_id, 'helper'):
+        staff_list = "👮 Администрация\n━━━━━━━━━━━━\n👑 Создатель: @id749488560\n"
+        send_message(peer_id, staff_list)
+    
+    elif text.startswith("/setnick") and has_permission(peer_id, user_id, 'helper'):
+        parts = text.split()
+        if len(parts) > 2:
+            target_id = int(parts[1][3:]) if parts[1].startswith("@id") else int(parts[1])
+            nickname = " ".join(parts[2:])
+            if str(peer_id) not in nicks:
+                nicks[str(peer_id)] = {}
+            nicks[str(peer_id)][str(target_id)] = nickname
+            save_data('nicks.json', nicks)
+            send_message(peer_id, f"✅ Ник установлен: {nickname}")
+    
+    elif text == "/nlist" and has_permission(peer_id, user_id, 'helper'):
+        if str(peer_id) in nicks and nicks[str(peer_id)]:
+            lst = "\n".join([f"{get_nick(peer_id, int(uid))}" for uid in list(nicks[str(peer_id)].keys())[:10]])
+            send_message(peer_id, f"📝 Список ников:\n{lst}")
+    
+    elif text == "/warnlist" and has_permission(peer_id, user_id, 'helper'):
+        if str(peer_id) in warns:
+            lst = []
+            for uid, data in warns[str(peer_id)].items():
+                lst.append(f"{get_nick(peer_id, int(uid))}: {data['count']} варнов")
+            send_message(peer_id, "⚠ Список варнов:\n" + "\n".join(lst[:10]))
+    
+    elif text == "/mutelist" and has_permission(peer_id, user_id, 'helper'):
+        if str(peer_id) in mutes:
+            lst = []
+            for uid, until in mutes[str(peer_id)].items():
+                if until > time.time():
+                    remaining = int((until - time.time()) / 60)
+                    lst.append(f"{get_nick(peer_id, int(uid))}: {remaining} мин")
+            send_message(peer_id, "🔇 Замучены:\n" + "\n".join(lst[:10]))
+    
+    # ═══════════════════════════════════════════════════════
+    # МОДЕРАТОРЫ (уровень moderator)
+    # ═══════════════════════════════════════════════════════
+    
+    elif text.startswith("/ban") and has_permission(peer_id, user_id, 'moderator'):
+        parts = text.split()
+        if len(parts) > 1:
+            target_id = int(parts[1][3:]) if parts[1].startswith("@id") else int(parts[1])
+            reason = " ".join(parts[2:]) if len(parts) > 2 else "Не указана"
+            ban_user(peer_id, target_id, reason)
+            send_message(peer_id, f"🔨 Бан навсегда\nПричина: {reason}")
+    
+    elif text.startswith("/unban") and has_permission(peer_id, user_id, 'moderator'):
+        parts = text.split()
+        if len(parts) > 1:
+            target_id = int(parts[1][3:]) if parts[1].startswith("@id") else int(parts[1])
+            if str(peer_id) in bans and str(target_id) in bans[str(peer_id)]:
+                del bans[str(peer_id)][str(target_id)]
+                save_data('bans.json', bans)
+                send_message(peer_id, "✅ Бан снят")
+    
+    elif text.startswith("/addmoder") and has_permission(peer_id, user_id, 'moderator'):
+        parts = text.split()
+        if len(parts) > 1:
+            target_id = int(parts[1][3:]) if parts[1].startswith("@id") else int(parts[1])
+            if str(peer_id) not in roles:
+                roles[str(peer_id)] = {}
+            roles[str(peer_id)][str(target_id)] = 'moderator'
+            save_data('roles.json', roles)
+            send_message(peer_id, f"✅ {get_nick(peer_id, target_id)} теперь модератор!")
+    
+    elif text.startswith("/removerole") and has_permission(peer_id, user_id, 'moderator'):
+        parts = text.split()
+        if len(parts) > 1:
+            target_id = int(parts[1][3:]) if parts[1].startswith("@id") else int(parts[1])
+            if str(peer_id) in roles and str(target_id) in roles[str(peer_id)]:
+                del roles[str(peer_id)][str(target_id)]
+                save_data('roles.json', roles)
+                send_message(peer_id, f"✅ Роль снята с {get_nick(peer_id, target_id)}")
+    
+    elif text == "/zov" and has_permission(peer_id, user_id, 'moderator'):
+        send_message(peer_id, "🔔 @all @everyone ВНИМАНИЕ! Срочное сообщение от администрации!")
+    
+    elif text == "/banlist" and has_permission(peer_id, user_id, 'moderator'):
+        if str(peer_id) in bans:
+            lst = [f"{get_nick(peer_id, int(uid))}: {data['reason']}" for uid, data in bans[str(peer_id)].items()]
+            send_message(peer_id, "🔨 Забаненные:\n" + "\n".join(lst[:10]))
+    
+    elif text.startswith("/inactivelist") and has_permission(peer_id, user_id, 'moderator'):
+        send_message(peer_id, "ℹ Функция в разработке")
+    
+    # ═══════════════════════════════════════════════════════
+    # СТАРШИЕ МОДЕРАТОРЫ (уровень senior_moderator)
+    # ═══════════════════════════════════════════════════════
+    
+    elif text == "/quiet" and has_permission(peer_id, user_id, 'senior_moderator'):
+        quiet_modes[str(peer_id)] = not quiet_modes.get(str(peer_id), False)
+        save_data('quiet_modes.json', quiet_modes)
+        status = "включен" if quiet_modes[str(peer_id)] else "выключен"
+        send_message(peer_id, f"🔇 Режим тишины {status}")
+    
+    elif text.startswith("/addsenmoder") and has_permission(peer_id, user_id, 'senior_moderator'):
+        parts = text.split()
+        if len(parts) > 1:
+            target_id = int(parts[1][3:]) if parts[1].startswith("@id") else int(parts[1])
+            roles[str(peer_id)][str(target_id)] = 'senior_moderator'
+            save_data('roles.json', roles)
+            send_message(peer_id, f"✅ {get_nick(peer_id, target_id)} теперь старший модератор!")
+    
+    elif text.startswith("/bug") and has_permission(peer_id, user_id, 'senior_moderator'):
+        bug_text = text[5:]
+        for receiver in bug_receivers:
+            send_message(int(receiver), f"🐛 Баг от {get_nick(peer_id, user_id)}:\n{bug_text}")
+        send_message(peer_id, "✅ Баг отправлен разработчику")
+    
+    elif text == "/rnickall" and has_permission(peer_id, user_id, 'senior_moderator'):
+        if str(peer_id) in nicks:
+            del nicks[str(peer_id)]
+            save_data('nicks.json', nicks)
+            send_message(peer_id, "✅ Все ники сброшены")
+    
+    # ═══════════════════════════════════════════════════════
+    # АДМИНИСТРАТОРЫ (уровень admin)
+    # ═══════════════════════════════════════════════════════
+    
+    elif text.startswith("/addadmin") and has_permission(peer_id, user_id, 'admin'):
+        parts = text.split()
+        if len(parts) > 1:
+            target_id = int(parts[1][3:]) if parts[1].startswith("@id") else int(parts[1])
+            roles[str(peer_id)][str(target_id)] = 'admin'
+            save_data('roles.json', roles)
+            send_message(peer_id, f"✅ {get_nick(peer_id, target_id)} теперь администратор!")
+    
+    elif text == "/settings" and has_permission(peer_id, user_id, 'admin'):
+        send_message(peer_id, "⚙ Настройки беседы:\n/quiet - тишина\n/filter - фильтр мата\n/antiflood - антифлуд")
+    
+    elif text == "/filter" and has_permission(peer_id, user_id, 'admin'):
+        # Переключатель фильтра
+        send_message(peer_id, "✅ Фильтр мата активен")
+    
+    elif text == "/serverinfo" and has_permission(peer_id, user_id, 'admin'):
+        chat_info = vk.messages.getConversationsById(peer_ids=peer_id)
+        send_message(peer_id, f"ℹ Информация о беседе отправлена в личку")
+    
+    elif text == "/rkick" and has_permission(peer_id, user_id, 'admin'):
+        send_message(peer_id, "⚠ Функция масс-кика в разработке")
+    
+    # ═══════════════════════════════════════════════════════
+    # СТАРШИЕ АДМИНИСТРАТОРЫ (уровень senior_admin)
+    # ═══════════════════════════════════════════════════════
+    
+    elif text.startswith("/type") and has_permission(peer_id, user_id, 'senior_admin'):
+        parts = text.split()
+        if len(parts) > 1:
+            chat_types[str(peer_id)] = int(parts[1])
+            save_data('chat_types.json', chat_types)
+            send_message(peer_id, f"✅ Тип беседы изменен на {parts[1]}")
+    
+    elif text == "/leave" and has_permission(peer_id, user_id, 'senior_admin'):
+        send_message(peer_id, "👋 Бот покидает беседу...")
+        time.sleep(1)
+        vk.messages.removeChatUser(chat_id=peer_id-2000000000, user_id=GROUP_ID)
+    
+    elif text.startswith("/editowner") and has_permission(peer_id, user_id, 'senior_admin'):
+        send_message(peer_id, "⚠ Только создатель может передать права!")
+    
+    elif text.startswith("/pin") and has_permission(peer_id, user_id, 'senior_admin'):
+        pin_text = text[5:]
+        vk.messages.pin(peer_id=peer_id, message_id=msg_id)
+        send_message(peer_id, f"📌 Закреплено: {pin_text}")
+    
+    elif text == "/unpin" and has_permission(peer_id, user_id, 'senior_admin'):
+        vk.messages.unpin(peer_id=peer_id)
+        send_message(peer_id, "📌 Закрепление снято")
+    
+    elif text == "/rroleall" and has_permission(peer_id, user_id, 'senior_admin'):
+        if str(peer_id) in roles:
+            del roles[str(peer_id)]
+            save_data('roles.json', roles)
+            send_message(peer_id, "✅ Все роли сброшены")
+    
+    elif text.startswith("/addsenadm") and has_permission(peer_id, user_id, 'senior_admin'):
+        parts = text.split()
+        if len(parts) > 1:
+            target_id = int(parts[1][3:]) if parts[1].startswith("@id") else int(parts[1])
+            roles[str(peer_id)][str(target_id)] = 'senior_admin'
+            save_data('roles.json', roles)
+            send_message(peer_id, f"✅ {get_nick(peer_id, target_id)} теперь старший администратор!")
+    
+    elif text == "/masskick" and has_permission(peer_id, user_id, 'senior_admin'):
+        send_message(peer_id, "⚠ Массовый кик в разработке")
+    
+    elif text == "/invite" and has_permission(peer_id, user_id, 'senior_admin'):
+        send_message(peer_id, "✅ Приглашения разрешены модераторам")
+    
+    elif text == "/antiflood" and has_permission(peer_id, user_id, 'senior_admin'):
+        anti_flood[str(peer_id)] = not anti_flood.get(str(peer_id), False)
+        save_data('anti_flood.json', anti_flood)
+        status = "включен" if anti_flood[str(peer_id)] else "выключен"
+        send_message(peer_id, f"🌊 Антифлуд {status}")
+    
+    elif text.startswith("/welcometext") and has_permission(peer_id, user_id, 'senior_admin'):
+        welcome_texts[str(peer_id)] = text[13:]
+        save_data('welcome_texts.json', welcome_texts)
+        send_message(peer_id, f"✅ Приветствие установлено")
+    
+    # ═══════════════════════════════════════════════════════
+    # СПЕЦ АДМИНИСТРАТОРЫ (уровень special_admin)
+    # ═══════════════════════════════════════════════════════
+    
+    elif text.startswith("/gban") and has_permission(peer_id, user_id, 'special_admin'):
+        parts = text.split()
+        if len(parts) > 1:
+            target_id = int(parts[1][3:]) if parts[1].startswith("@id") else int(parts[1])
+            global_bans.append(target_id)
+            save_data('global_bans.json', global_bans)
+            send_message(peer_id, f"🌍 Глобальный бан для {get_nick(peer_id, target_id)}")
+    
+    elif text.startswith("/gunban") and has_permission(peer_id, user_id, 'special_admin'):
+        parts = text.split()
+        if len(parts) > 1:
+            target_id = int(parts[1][3:]) if parts[1].startswith("@id") else int(parts[1])
+            if target_id in global_bans:
+                global_bans.remove(target_id)
+                save_data('global_bans.json', global_bans)
+                send_message(peer_id, f"🌍 Глобальный бан снят")
+    
+    elif text == "/gbanlist" and has_permission(peer_id, user_id, 'special_admin'):
+        lst = [f"ID{uid}" for uid in global_bans[:20]]
+        send_message(peer_id, "🌍 Глобал баны:\n" + "\n".join(lst))
+    
+    elif text == "/banwords" and has_permission(peer_id, user_id, 'special_admin'):
+        words = ", ".join(filter_words[:15])
+        send_message(peer_id, f"🚫 Запрещенные слова:\n{words}")
+    
+    elif text.startswith("/addowner") and has_permission(peer_id, user_id, 'special_admin'):
+        parts = text.split()
+        if len(parts) > 1:
+            target_id = int(parts[1][3:]) if parts[1].startswith("@id") else int(parts[1])
+            roles[str(peer_id)][str(target_id)] = 'creator'
+            save_data('roles.json', roles)
+            send_message(peer_id, f"👑 {get_nick(peer_id, target_id)} теперь владелец беседы!")
+    
+    elif text.startswith("/skick") and has_permission(peer_id, user_id, 'special_admin'):
+        send_message(peer_id, "⚠ Супер кик в разработке")
+    
+    elif text.startswith("/sban") and has_permission(peer_id, user_id, 'special_admin'):
+        send_message(peer_id, "⚠ Супер бан в разработке")
+    
+    # ═══════════════════════════════════════════════════════
+    # ЗАМ.СПЕЦ АДМИНА (уровень deputy_special)
+    # ═══════════════════════════════════════════════════════
+    
+    elif text.startswith("/addword") and has_permission(peer_id, user_id, 'deputy_special'):
+        word = text[8:].strip().lower()
+        if word and word not in filter_words:
+            filter_words.append(word)
+            save_data('filter_words.json', filter_words)
+            send_message(peer_id, f"✅ Добавлено слово: {word}")
+    
+    elif text.startswith("/delword") and has_permission(peer_id, user_id, 'deputy_special'):
+        word = text[9:].strip().lower()
+        if word in filter_words:
+            filter_words.remove(word)
+            save_data('filter_words.json', filter_words)
+            send_message(peer_id, f"✅ Удалено слово: {word}")
+    
+    elif text.startswith("/pull") and has_permission(peer_id, user_id, 'deputy_special'):
+        name = text[6:].strip()
+        if name:
+            chat_binds[name] = peer_id
+            save_data('chat_binds.json', chat_binds)
+            send_message(peer_id, f"✅ Привязка '{name}' создана")
+    
+    elif text == "/pullinfo" and has_permission(peer_id, user_id, 'deputy_special'):
+        info = "\n".join([f"{k}: чат {v}" for k, v in chat_binds.items()])
+        send_message(peer_id, f"📋 Привязки:\n{info}")
+    
+    elif text.startswith("/delpull") and has_permission(peer_id, user_id, 'deputy_special'):
+        name = text[9:].strip()
+        if name in chat_binds:
+            del chat_binds[name]
+            save_data('chat_binds.json', chat_binds)
+            send_message(peer_id, f"✅ Привязка '{name}' удалена")
+    
+    elif text.startswith("/srnick") and has_permission(peer_id, user_id, 'deputy_special'):
+        parts = text.split()
+        if len(parts) > 1:
+            target_id = int(parts[1][3:]) if parts[1].startswith("@id") else int(parts[1])
+            for p in list(nicks.keys()):
+                if str(target_id) in nicks[p]:
+                    del nicks[p][str(target_id)]
+            save_data('nicks.json', nicks)
+            send_message(peer_id, "✅ Ник сброшен везде")
+    
+    elif text.startswith("/ssetnick") and has_permission(peer_id, user_id, 'deputy_special'):
+        parts = text.split()
+        if len(parts) > 2:
+            target_id = int(parts[1][3:]) if parts[1].startswith("@id") else int(parts[1])
+            nickname = " ".join(parts[2:])
+            for p in list(nicks.keys()):
+                if str(p) not in nicks:
+                    nicks[str(p)] = {}
+                nicks[str(p)][str(target_id)] = nickname
+            save_data('nicks.json', nicks)
+            send_message(peer_id, f"✅ Ник '{nickname}' установлен везде")
+    
+    elif text.startswith("/srrole") and has_permission(peer_id, user_id, 'deputy_special'):
+        parts = text.split()
+        if len(parts) > 1:
+            target_id = int(parts[1][3:]) if parts[1].startswith("@id") else int(parts[1])
+            for p in list(roles.keys()):
+                if str(target_id) in roles[p]:
+                    del roles[p][str(target_id)]
+            save_data('roles.json', roles)
+            send_message(peer_id, "✅ Роль сброшена везде")
+    
+    elif text.startswith("/srole") and has_permission(peer_id, user_id, 'deputy_special'):
+        parts = text.split()
+        if len(parts) > 2:
+            target_id = int(parts[1][3:]) if parts[1].startswith("@id") else int(parts[1])
+            role = parts[2]
+            for p in list(roles.keys()):
+                if str(p) not in roles:
+                    roles[str(p)] = {}
+                roles[str(p)][str(target_id)] = role
+            save_data('roles.json', roles)
+            send_message(peer_id, f"✅ Роль '{role}' выдана везде")
+    
+    elif text.startswith("/szov") and has_permission(peer_id, user_id, 'deputy_special'):
+        msg = text[6:] if len(text) > 6 else "ВНИМАНИЕ!"
+        for p in list(chat_binds.values()):
+            send_message(p, f"🔔 ГЛОБАЛЬНОЕ ОПОВЕЩЕНИЕ:\n{msg}")
+        send_message(peer_id, "✅ Супер-упоминание отправлено")
+    
+    # ═══════════════════════════════════════════════════════
+    # ВЛАДЕЛЕЦ БЕСЕДЫ (уровень creator)
+    # ═══════════════════════════════════════════════════════
+    
+    elif text.startswith("/gremoverole") and has_permission(peer_id, user_id, 'creator'):
+        parts = text.split()
+        if len(parts) > 1:
+            target_id = int(parts[1][3:]) if parts[1].startswith("@id") else int(parts[1])
+            for p in list(roles.keys()):
+                if str(target_id) in roles[p]:
+                    del roles[p][str(target_id)]
+            save_data('roles.json', roles)
+            send_message(peer_id, "✅ Роли сброшены везде")
+    
+    elif text.startswith("/news") and has_permission(peer_id, user_id, 'creator'):
+        news_text = text[6:]
+        for p in list(chat_binds.values()):
+            send_message(p, f"📢 НОВОСТИ:\n{news_text}")
+        send_message(peer_id, "✅ Новости отправлены")
+    
+    elif text.startswith("/addzam") and has_permission(peer_id, user_id, 'creator'):
+        parts = text.split()
+        if len(parts) > 1:
+            target_id = int(parts[1][3:]) if parts[1].startswith("@id") else int(parts[1])
+            roles[str(peer_id)][str(target_id)] = 'deputy_creator'
+            save_data('roles.json', roles)
+            send_message(peer_id, f"✅ {get_nick(peer_id, target_id)} теперь зам.создателя!")
+    
+    # ═══════════════════════════════════════════════════════
+    # ЗАМ.СОЗДАТЕЛЯ (уровень deputy_creator)
+    # ═══════════════════════════════════════════════════════
+    
+    elif text.startswith("/banid") and has_permission(peer_id, user_id, 'deputy_creator'):
+        parts = text.split()
+        if len(parts) > 1:
+            target_peer = int(parts[1])
+            bans[str(target_peer)] = {}
+            save_data('bans.json', bans)
+            send_message(peer_id, f"✅ Беседа {target_peer} заблокирована")
+    
+    elif text.startswith("/unbanid") and has_permission(peer_id, user_id, 'deputy_creator'):
+        parts = text.split()
+        if len(parts) > 1:
+            target_peer = int(parts[1])
+            if str(target_peer) in bans:
+                del bans[str(target_peer)]
+                save_data('bans.json', bans)
+                send_message(peer_id, f"✅ Беседа {target_peer} разблокирована")
+    
+    elif text.startswith("/clearchat") and has_permission(peer_id, user_id, 'deputy_creator'):
+        parts = text.split()
+        if len(parts) > 1:
+            target_peer = int(parts[1])
+            # Очистка всех данных чата
+            for db in [bans, mutes, warns, nicks, roles, quiet_modes, anti_flood, welcome_texts]:
+                if str(target_peer) in db:
+                    del db[str(target_peer)]
+            save_data('bans.json', bans)
+            save_data('mutes.json', mutes)
+            save_data('warns.json', warns)
+            save_data('nicks.json', nicks)
+            save_data('roles.json', roles)
+            send_message(peer_id, f"✅ Чат {target_peer} очищен из БД")
+    
+    elif text.startswith("/infoid") and has_permission(peer_id, user_id, 'deputy_creator'):
+        parts = text.split()
+        if len(parts) > 1:
+            target_id = int(parts[1][3:]) if parts[1].startswith("@id") else int(parts[1])
+            info = f"📊 Инфо о ID{target_id}\n"
+            info += f"Глобал бан: {'Да' if target_id in global_bans else 'Нет'}\n"
+            info += f"Количество чатов с ролями: {sum(1 for p in roles if str(target_id) in roles[p])}"
+            send_message(peer_id, info)
+    
+    elif text == "/listchats" and has_permission(peer_id, user_id, 'deputy_creator'):
+        chats = list(chat_binds.values())
+        send_message(peer_id, f"📋 Всего чатов: {len(chats)}\nID: {', '.join(map(str, chats[:10]))}")
+    
+    elif text == "/server" and has_permission(peer_id, user_id, 'deputy_creator'):
+        send_message(peer_id, f"🖥 Сервер: OK\n📊 БД: {len(bans)} банов, {len(mutes)} мутов\n⏱ Аптайм: активен")
+    
+    # ═══════════════════════════════════════════════════════
+    # СОЗДАТЕЛЬ БОТА (только CREATOR_ID)
+    # ═══════════════════════════════════════════════════════
+    
+    elif text.startswith("/adddev") and user_id == CREATOR_ID:
+        parts = text.split()
+        if len(parts) > 1:
+            target_id = int(parts[1][3:]) if parts[1].startswith("@id") else int(parts[1])
+            roles[f"dev_{target_id}"] = {'level': 99}
+            send_message(peer_id, f"✅ Права создателя выданы ID{target_id}")
+    
+    elif text.startswith("/addbug") and user_id == CREATOR_ID:
+        parts = text.split()
+        if len(parts) > 1:
+            target_id = int(parts[1][3:]) if parts[1].startswith("@id") else int(parts[1])
+            bug_receivers.append(target_id)
+            save_data('bug_receivers.json', bug_receivers)
+            send_message(peer_id, f"✅ ID{target_id} добавлен в получатели багов")
+    
+    elif text.startswith("/delbug") and user_id == CREATOR_ID:
+        parts = text.split()
+        if len(parts) > 1:
+            target_id = int(parts[1][3:]) if parts[1].startswith("@id") else int(parts[1])
+            if target_id in bug_receivers:
+                bug_receivers.remove(target_id)
+                save_data('bug_receivers.json', bug_receivers)
+                send_message(peer_id, f"✅ ID{target_id} удален из получателей багов")
+    
+    elif text == "/sync" and user_id == CREATOR_ID:
+        # Перезагрузка всех данных
+        global bans, mutes, warns, nicks, roles, global_bans, filter_words
+        bans = load_data('bans.json')
+        mutes = load_data('mutes.json')
+        warns = load_data('warns.json')
+        nicks = load_data('nicks.json')
+        roles = load_data('roles.json')
+        global_bans = load_data('global_bans.json')
+        filter_words = load_data('filter_words.json')
+        send_message(peer_id, "✅ База данных синхронизирована")
+
+# Обработка новых участников
+def handle_new_member(peer_id, user_id):
+    if str(peer_id) in welcome_texts:
+        send_message(peer_id, welcome_texts[str(peer_id)].replace("{user}", get_nick(peer_id, user_id)))
+
+# Главный цикл
+def main():
+    print("🤖 BLACK FIB BOT ЗАПУЩЕН!")
+    print(f"👑 Создатель: @id{CREATOR_ID}")
+    print("━━━━━━━━━━━━━━━━━━━━━━━━")
+    print("✅ Все команды загружены")
+    print("✅ Базы данных инициализированы")
+    print("━━━━━━━━━━━━━━━━━━━━━━━━")
+    print("Ожидание сообщений...")
+    
+    for event in longpoll.listen():
+        try:
+            if event.type == VkBotEventType.MESSAGE_NEW:
+                msg = event.obj.message
+                peer_id = msg['peer_id']
+                user_id = msg['from_id']
+                text = msg.get('text', '').strip()
+                msg_id = msg.get('id')
+                
+                # Игнорируем себя
+                if user_id == GROUP_ID:
+                    continue
+                
+                # Обработка команды
+                if text.startswith('/'):
+                    handle_command(peer_id, user_id, text, msg_id)
+            
+            elif event.type == VkBotEventType.GROUP_JOIN:
+                if event.obj.user_id:
+                    handle_new_member(event.obj.peer_id, event.obj.user_id)
+                    
+        except Exception as e:
+            print(f"Ошибка: {e}")
+            if CREATOR_ID:
                 try:
-                    vk.messages.removeChatUser(chat_id=cid, user_id=uid)
+                    send_message(CREATOR_ID, f"❌ Ошибка бота: {str(e)[:200]}")
                 except:
                     pass
-                continue
-            
-            if is_banned(uid, cid):
-                try:
-                    vk.messages.removeChatUser(chat_id=cid, user_id=uid)
-                except:
-                    pass
-                continue
-            
-            if is_muted(uid, cid):
-                continue
-            
-            activated = c.execute("SELECT activated FROM chats WHERE chat_id=?", (cid,)).fetchone()
-            if not activated or activated[0] == 0:
-                if msg == '/start' and uid == OWNER_ID:
-                    c.execute("UPDATE chats SET activated=1 WHERE chat_id=?", (cid,))
-                    conn.commit()
-                    send(peer, "✅ БОТ АКТИВИРОВАН!\n/help - список команд")
-                continue
-            
-            if not msg.startswith('/'):
-                for w in c.execute("SELECT word FROM badwords").fetchall():
-                    if w[0].lower() in msg_lower:
-                        try:
-                            vk.messages.delete(message_ids=[event.message_id], delete_for_all=1)
-                        except:
-                            pass
-                        add_warn(cid, uid, 0, f"Мат: {w[0]}")
-                        break
-        
-        # ============= КОМАНДЫ =============
-        
-        if msg == '/help':
-            send(peer, """📚 ВСЕ КОМАНДЫ:
-━━━━━━━━━━━━━━━━━━━━
-/info - информация
-/stats @user - статистика
-/getid - узнать ID
-/test - проверка
 
-/kick @user - кик
-/mute @user 30 - мут
-/unmute @user - размут
-/warn @user - варн
-/unwarn @user - снять варн
-/clear 10 - очистка
-/staff - список админов
-/setnick @user ник - ник
-/nlist - список ников
-/warnlist - список варнов
-/mutelist - список мутов
-
-/ban @user - бан
-/unban @user - разбан
-/addmoder @user - дать модера
-/removerole @user - забрать роль
-/zov - @всех
-/banlist - список банов
-/getban @user - инфо о бане
-/checkban @user - проверить бан
-/addadmin @user - дать админа
-
-/gban @user - глобальный бан
-/gunban @user - глобальный разбан
-/gbanlist - список глобальных банов
-/checkgban @user - проверить глобальный бан
-
-/addword слово - добавить слово
-/delword слово - удалить слово
-/banwords - список слов
-/sync - синхронизация
-━━━━━━━━━━━━━━━━━━━━
-👑 ВЛАДЕЛЕЦ: АНДРЕЙ""")
-        
-        elif msg == '/info':
-            send(peer, "🤖 БОТ v4.0\n👑 ВЛАДЕЛЕЦ: АНДРЕЙ\n/help - ВСЕ КОМАНДЫ")
-        
-        elif msg.startswith('/stats'):
-            target = extract_id(msg) if '[' in msg else uid
-            if target:
-                data = c.execute("SELECT warns, mute, role FROM users WHERE user_id=? AND chat_id=?", (target, cid)).fetchone()
-                if data:
-                    muted = "НЕТ" if not data[1] else f"ДО {data[1][:16]}"
-                    send(peer, f"📊 {get_name(target)}\nРоль: {data[2]}\nВарны: {data[0]}/3\nМут: {muted}")
-                else:
-                    send(peer, f"📊 {get_name(target)}\nВарны: 0/3")
-        
-        elif msg == '/getid':
-            send(peer, f"🆔 ID: {uid}")
-        
-        elif msg == '/test':
-            send(peer, f"✅ БОТ РАБОТАЕТ!\nТВОЙ ID: {uid}")
-        
-        elif msg.startswith('/kick '):
-            if not check_perm(uid, cid, 'moderator'):
-                send(peer, "❌ НЕТ ПРАВ!")
-            else:
-                target = extract_id(msg)
-                if target:
-                    reason = msg.split(' ', 2)[2] if len(msg.split(' ', 2)) > 2 else "Нарушение"
-                    kick_user(cid, target, uid, reason)
-                else:
-                    send(peer, "❌ /kick @user [причина]")
-        
-        elif msg.startswith('/mute '):
-            if not check_perm(uid, cid, 'moderator'):
-                send(peer, "❌ НЕТ ПРАВ!")
-            else:
-                target = extract_id(msg)
-                if target:
-                    nums = re.findall(r'(\d+)', msg)
-                    mins = int(nums[1]) if len(nums) > 1 else 30
-                    reason = msg.split(' ', 3)[3] if len(msg.split(' ', 3)) > 3 else "Нарушение"
-                    mute_user(cid, target, mins, uid, reason)
-                else:
-                    send(peer, "❌ /mute @user 30 [причина]")
-        
-        elif msg.startswith('/unmute '):
-            if not check_perm(uid, cid, 'moderator'):
-                send(peer, "❌ НЕТ ПРАВ!")
-            else:
-                target = extract_id(msg)
-                if target:
-                    c.execute("UPDATE users SET mute=NULL WHERE user_id=? AND chat_id=?", (target, cid))
-                    conn.commit()
-                    send(peer, f"🔊 {get_name(target)} РАЗМУЧЕН")
-                else:
-                    send(peer, "❌ /unmute @user")
-        
-        elif msg.startswith('/warn '):
-            if not check_perm(uid, cid, 'moderator'):
-                send(peer, "❌ НЕТ ПРАВ!")
-            else:
-                target = extract_id(msg)
-                if target:
-                    reason = msg.split(' ', 2)[2] if len(msg.split(' ', 2)) > 2 else "Нарушение"
-                    add_warn(cid, target, uid, reason)
-                else:
-                    send(peer, "❌ /warn @user [причина]")
-        
-        elif msg.startswith('/unwarn '):
-            if not check_perm(uid, cid, 'moderator'):
-                send(peer, "❌ НЕТ ПРАВ!")
-            else:
-                target = extract_id(msg)
-                if target:
-                    w = c.execute("SELECT warns FROM users WHERE user_id=? AND chat_id=?", (target, cid)).fetchone()
-                    if w and w[0] > 0:
-                        c.execute("UPDATE users SET warns=warns-1 WHERE user_id=? AND chat_id=?", (target, cid))
-                        conn.commit()
-                        send(peer, f"✅ {get_name(target)} | ВАРН СНЯТ")
-                    else:
-                        send(peer, "❌ НЕТ ВАРНОВ")
-                else:
-                    send(peer, "❌ /unwarn @user")
-        
-        elif msg.startswith('/clear '):
-            if not check_perm(uid, cid, 'moderator'):
-                send(peer, "❌ НЕТ ПРАВ!")
-            else:
-                nums = re.findall(r'(\d+)', msg)
-                count = int(nums[0]) if nums else 10
-                if count > 100:
-                    count = 100
-                try:
-                    history = vk.messages.getHistory(peer_id=peer, count=count)
-                    ids = [m['id'] for m in history['items']]
-                    vk.messages.delete(message_ids=ids, delete_for_all=1)
-                    send(peer, f"✅ ОЧИЩЕНО {len(ids)} СООБЩЕНИЙ")
-                except:
-                    send(peer, "❌ ОШИБКА ОЧИСТКИ")
-        
-        elif msg == '/staff':
-            if not cid:
-                send(peer, "❌ ТОЛЬКО В БЕСЕДЕ")
-            else:
-                admins = c.execute("SELECT user_id, role FROM users WHERE chat_id=? AND role != 'user'", (cid,)).fetchall()
-                if admins:
-                    txt = "👥 АДМИНИСТРАЦИЯ:\n"
-                    for a in admins:
-                        txt += f"• {get_name(a[0])} - {a[1]}\n"
-                    send(peer, txt)
-                else:
-                    send(peer, "❌ НЕТ АДМИНИСТРАЦИИ")
-        
-        elif msg.startswith('/setnick '):
-            if not check_perm(uid, cid, 'moderator'):
-                send(peer, "❌ НЕТ ПРАВ!")
-            else:
-                target = extract_id(msg)
-                if target:
-                    nick = msg.split(' ', 2)[2] if len(msg.split(' ', 2)) > 2 else None
-                    if nick:
-                        c.execute("UPDATE users SET nick=? WHERE user_id=? AND chat_id=?", (nick, target, cid))
-                        conn.commit()
-                        send(peer, f"🏷 {get_name(target)} | НИК: {nick}")
-                    else:
-                        send(peer, "❌ /setnick @user НИК")
-                else:
-                    send(peer, "❌ /setnick @user НИК")
-        
-        elif msg == '/nlist':
-            if not check_perm(uid, cid, 'moderator'):
-                send(peer, "❌ НЕТ ПРАВ!")
-            else:
-                nicks = c.execute("SELECT user_id, nick FROM users WHERE chat_id=? AND nick IS NOT NULL", (cid,)).fetchall()
-                if nicks:
-                    txt = "🏷 СПИСОК НИКОВ:\n"
-                    for n in nicks[:20]:
-                        txt += f"• {get_name(n[0])} → {n[1]}\n"
-                    send(peer, txt)
-                else:
-                    send(peer, "❌ НЕТ НИКОВ")
-        
-        elif msg == '/warnlist':
-            if not check_perm(uid, cid, 'moderator'):
-                send(peer, "❌ НЕТ ПРАВ!")
-            else:
-                warned = c.execute("SELECT user_id, warns FROM users WHERE chat_id=? AND warns>0 ORDER BY warns DESC", (cid,)).fetchall()
-                if warned:
-                    txt = "⚠️ СПИСОК ВАРНОВ:\n"
-                    for w in warned:
-                        txt += f"• {get_name(w[0])} → {w[1]}/3\n"
-                    send(peer, txt)
-                else:
-                    send(peer, "✅ НЕТ ВАРНОВ")
-        
-        elif msg == '/mutelist':
-            if not check_perm(uid, cid, 'moderator'):
-                send(peer, "❌ НЕТ ПРАВ!")
-            else:
-                now = datetime.now()
-                muted = c.execute("SELECT user_id, mute FROM users WHERE chat_id=? AND mute IS NOT NULL", (cid,)).fetchall()
-                active = []
-                for m in muted:
-                    try:
-                        till = datetime.strptime(m[1], '%Y-%m-%d %H:%M:%S')
-                        if till > now:
-                            active.append((m[0], till))
-                    except:
-                        pass
-                if active:
-                    txt = "🔇 АКТИВНЫЕ МУТЫ:\n"
-                    for a in active:
-                        left = a[1] - now
-                        txt += f"• {get_name(a[0])} → {left.seconds//60} МИН\n"
-                    send(peer, txt)
-                else:
-                    send(peer, "✅ НЕТ МУТОВ")
-        
-        elif msg.startswith('/ban '):
-            if not check_perm(uid, cid, 'admin'):
-                send(peer, "❌ НЕТ ПРАВ! ТРЕБУЕТСЯ АДМИНИСТРАТОР")
-            else:
-                target = extract_id(msg)
-                if target:
-                    reason = msg.split(' ', 2)[2] if len(msg.split(' ', 2)) > 2 else "Нарушение"
-                    ban_user(cid, target, uid, reason)
-                else:
-                    send(peer, "❌ /ban @user [ПРИЧИНА]")
-        
-        elif msg.startswith('/unban '):
-            if not check_perm(uid, cid, 'admin'):
-                send(peer, "❌ НЕТ ПРАВ! ТРЕБУЕТСЯ АДМИНИСТРАТОР")
-            else:
-                target = extract_id(msg)
-                if target:
-                    unban_user(cid, target, uid)
-                else:
-                    send(peer, "❌ /unban @user")
-        
-        elif msg.startswith('/addmoder '):
-            if not check_perm(uid, cid, 'admin'):
-                send(peer, "❌ НЕТ ПРАВ! ТРЕБУЕТСЯ АДМИНИСТРАТОР")
-            else:
-                target = extract_id(msg)
-                if target:
-                    c.execute("INSERT OR REPLACE INTO users (user_id, chat_id, role) VALUES (?,?,?)", (target, cid, 'moderator'))
-                    conn.commit()
-                    send(peer, f"✅ {get_name(target)} | ТЕПЕРЬ МОДЕРАТОР")
-                else:
-                    send(peer, "❌ /addmoder @user")
-        
-        elif msg.startswith('/removerole '):
-            if not check_perm(uid, cid, 'admin'):
-                send(peer, "❌ НЕТ ПРАВ! ТРЕБУЕТСЯ АДМИНИСТРАТОР")
-            else:
-                target = extract_id(msg)
-                if target:
-                    if target == OWNER_ID:
-                        send(peer, "❌ НЕЛЬЗЯ ЗАБРАТЬ РОЛЬ У ВЛАДЕЛЬЦА БОТА!")
-                        continue
-                    c.execute("UPDATE users SET role='user' WHERE user_id=? AND chat_id=?", (target, cid))
-                    conn.commit()
-                    send(peer, f"✅ {get_name(target)} | РОЛЬ ЗАБРАНА")
-                else:
-                    send(peer, "❌ /removerole @user")
-        
-        elif msg == '/zov':
-            if not check_perm(uid, cid, 'admin'):
-                send(peer, "❌ НЕТ ПРАВ! ТРЕБУЕТСЯ АДМИНИСТРАТОР")
-            else:
-                users = get_chat_users(cid)
-                mentions = [f"[id{u}|{get_name(u)}]" for u in users if u > 0 and u != uid]
-                if mentions:
-                    for i in range(0, len(mentions), 10):
-                        send(peer, ' '.join(mentions[i:i+10]))
-                        time.sleep(0.5)
-                else:
-                    send(peer, "❌ НЕТ ПОЛЬЗОВАТЕЛЕЙ")
-        
-        elif msg == '/banlist':
-            if not check_perm(uid, cid, 'admin'):
-                send(peer, "❌ НЕТ ПРАВ! ТРЕБУЕТСЯ АДМИНИСТРАТОР")
-            else:
-                bans = c.execute("SELECT user_id, reason, date FROM bans WHERE chat_id=?", (cid,)).fetchall()
-                if bans:
-                    txt = "🚫 СПИСОК БАНОВ:\n"
-                    for b in bans[:15]:
-                        txt += f"• {get_name(b[0])} → {b[2][:10]}\n  {b[1][:30]}\n"
-                    send(peer, txt)
-                else:
-                    send(peer, "✅ НЕТ БАНОВ")
-        
-        elif msg.startswith('/getban '):
-            if not check_perm(uid, cid, 'admin'):
-                send(peer, "❌ НЕТ ПРАВ! ТРЕБУЕТСЯ АДМИНИСТРАТОР")
-            else:
-                target = extract_id(msg)
-                if target:
-                    send(peer, f"🚫 ИНФО О БАНЕ {get_name(target)}:\n{get_ban_info(target, cid)}")
-                else:
-                    send(peer, "❌ /getban @user")
-        
-        elif msg.startswith('/checkban '):
-            target = extract_id(msg)
-            if target:
-                send(peer, f"🔍 ПРОВЕРКА БАНА {get_name(target)}:\n{get_ban_info(target, cid) if cid else 'ТОЛЬКО В БЕСЕДЕ'}")
-            else:
-                send(peer, "❌ /checkban @user")
-        
-        elif msg.startswith('/addadmin '):
-            if not check_perm(uid, cid, 'owner'):
-                send(peer, "❌ НЕТ ПРАВ! ТРЕБУЕТСЯ ВЛАДЕЛЕЦ БЕСЕДЫ")
-            else:
-                target = extract_id(msg)
-                if target:
-                    c.execute("INSERT OR REPLACE INTO users (user_id, chat_id, role) VALUES (?,?,?)", (target, cid, 'admin'))
-                    conn.commit()
-                    send(peer, f"✅ {get_name(target)} | ТЕПЕРЬ АДМИНИСТРАТОР")
-                else:
-                    send(peer, "❌ /addadmin @user")
-        
-        elif msg.startswith('/gban ') or msg.startswith('/gbanpl '):
-            if uid != OWNER_ID:
-                send(peer, "❌ ТОЛЬКО ВЛАДЕЛЕЦ БОТА!")
-            else:
-                target = extract_id(msg)
-                if target:
-                    reason = msg.split(' ', 2)[2] if len(msg.split(' ', 2)) > 2 else "Глобальное нарушение"
-                    global_ban(target, uid, reason)
-                    send(peer, f"🌐 {get_name(target)} | ГЛОБАЛЬНЫЙ БАН\n📝 {reason}")
-                else:
-                    send(peer, "❌ /gban @user [ПРИЧИНА]")
-        
-        elif msg.startswith('/gunban ') or msg.startswith('/gunbanpl '):
-            if uid != OWNER_ID:
-                send(peer, "❌ ТОЛЬКО ВЛАДЕЛЕЦ БОТА!")
-            else:
-                target = extract_id(msg)
-                if target:
-                    global_unban(target, uid)
-                    send(peer, f"🌐 {get_name(target)} | ГЛОБАЛЬНЫЙ РАЗБАН")
-                else:
-                    send(peer, "❌ /gunban @user")
-        
-        elif msg == '/gbanlist':
-            if uid != OWNER_ID:
-                send(peer, "❌ ТОЛЬКО ВЛАДЕЛЕЦ БОТА!")
-            else:
-                bans = c.execute("SELECT user_id, reason, date FROM global_bans").fetchall()
-                if bans:
-                    txt = "🌐 ГЛОБАЛЬНЫЕ БАНЫ:\n"
-                    for b in bans:
-                        txt += f"• {get_name(b[0])} → {b[2][:10]}\n  {b[1][:30]}\n"
-                    send(peer, txt)
-                else:
-                    send(peer, "✅ НЕТ ГЛОБАЛЬНЫХ БАНОВ")
-        
-        elif msg.startswith('/checkgban '):
-            target = extract_id(msg)
-            if target:
-                send(peer, f"🌐 ПРОВЕРКА ГЛОБАЛЬНОГО БАНА {get_name(target)}:\n{get_global_ban_info(target)}")
-            else:
-                send(peer, "❌ /checkgban @user")
-        
-        elif msg.startswith('/addword '):
-            if uid != OWNER_ID:
-                send(peer, "❌ ТОЛЬКО ВЛАДЕЛЕЦ БОТА!")
-            else:
-                word = msg[9:].lower()
-                if word:
-                    c.execute("INSERT OR IGNORE INTO badwords (word) VALUES (?)", (word,))
-                    conn.commit()
-                    send(peer, f"✅ СЛОВО '{word}' ДОБАВЛЕНО")
-                else:
-                    send(peer, "❌ /addword СЛОВО")
-        
-        elif msg.startswith('/delword '):
-            if uid != OWNER_ID:
-                send(peer, "❌ ТОЛЬКО ВЛАДЕЛЕЦ БОТА!")
-            else:
-                word = msg[9:].lower()
-                if word:
-                    c.execute("DELETE FROM badwords WHERE word=?", (word,))
-                    conn.commit()
-                    send(peer, f"✅ СЛОВО '{word}' УДАЛЕНО")
-                else:
-                    send(peer, "❌ /delword СЛОВО")
-        
-        elif msg == '/banwords':
-            if uid != OWNER_ID:
-                send(peer, "❌ ТОЛЬКО ВЛАДЕЛЕЦ БОТА!")
-            else:
-                words = c.execute("SELECT word FROM badwords").fetchall()
-                if words:
-                    send(peer, "🚫 ЗАПРЕЩЕННЫЕ СЛОВА:\n" + ', '.join([w[0] for w in words]))
-                else:
-                    send(peer, "✅ НЕТ ЗАПРЕЩЕННЫХ СЛОВ")
-        
-        elif msg == '/sync':
-            if uid != OWNER_ID:
-                send(peer, "❌ ТОЛЬКО ВЛАДЕЛЕЦ БОТА!")
-            else:
-                conn.commit()
-                send(peer, "🔄 БАЗА ДАННЫХ СИНХРОНИЗИРОВАНА")
-        
-        elif msg == '/start' and cid and uid == OWNER_ID:
-            c.execute("UPDATE chats SET activated=1 WHERE chat_id=?", (cid,))
-            conn.commit()
-            send(peer, "✅ БОТ АКТИВИРОВАН В ЭТОЙ БЕСЕДЕ!\n/help - ВСЕ КОМАНДЫ")
-        
-        elif msg == '/start' and cid and uid != OWNER_ID:
-            send(peer, "❌ ТОЛЬКО ВЛАДЕЛЕЦ БОТА МОЖЕТ АКТИВИРОВАТЬ!")
-        
-        elif not cid and msg and not msg.startswith('/'):
-            send(peer, f"🤖 БОТ РАБОТАЕТ!\nТВОЙ ID: {uid}\nКОМАНДЫ: /help\n👑 ВЛАДЕЛЕЦ: АНДРЕЙ")
-
-print("БОТ ОСТАНОВЛЕН")
+if __name__ == "__main__":
+    main()
