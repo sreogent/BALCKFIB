@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 import re
 
 # Токен сообщества
-TOKEN = 'vk1.a.6TizPN4pg1-Fhk95_LrCbP9i3LqBnP_J5D-Y8Us4JN-1J2NIwReHNbyTscHIRlDoTluqgMsZRrHbQvXyJqizcZGoZ-bOzUiAk8v9UMfqVesLgBo-gKM4CCHhfZcZ5AGx4kQ-gubA_Fo2ViRP6o2PK3FHZph2cefAn-4IOydOluHpvYWmqw-KKMnwDa4QYYhB7AC_TJunZ_oApcoXbexZdg'
+TOKEN = 'vk1.a.wRKg7TDyRHLYaDIbUDhIcN8rNdl45HJdRI6fbd2vXKMCJU8Y4sdFCFt_aFX2qCY4EyQ5_m-bmYvqx0H0OpVb-h9-fXGlToaMV3xPeCORGULNZy9E-SJOF2cLIMoHLbqht3jTYqCsVQb41T_VR_sZ-KEV_xsrypxqEK4zY7tPpxT_jkA612EdFoo1ID-Gk-nLnv6tqg2cHz9v2W-RtmwxMg'
 GROUP_ID = 229320501
 
 # ТВОЙ ID ВК
