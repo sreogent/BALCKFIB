@@ -1,5 +1,6 @@
 import vk_api
 from vk_api.longpoll import VkLongPoll, VkEventType
+from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
 from vk_api.utils import get_random_id
 import sqlite3
 import time
@@ -112,6 +113,12 @@ LOCAL_ROLES_LEVEL = {
 
 ALL_ROLES = {**GLOBAL_ROLES_LEVEL, **LOCAL_ROLES_LEVEL}
 
+# Базовые слова для фильтра
+default_words = ['МАТЬШЛ']
+for word in default_words:
+    cur.execute("INSERT OR IGNORE INTO banwords VALUES (?)", (word,))
+conn.commit()
+
 # ==================== ФУНКЦИИ ====================
 
 # ----- ГЛОБАЛЬНЫЕ РОЛИ (видны во всех чатах) -----
@@ -150,24 +157,17 @@ def clear_all_local_roles(peer_id):
 
 # ----- ПОЛУЧЕНИЕ ИТОГОВОЙ РОЛИ -----
 def get_user_role(uid, peer_id):
-    # Сначала проверяем глобальную роль
     global_role = get_global_role(uid)
     if global_role != 'user':
         return global_role
-    # Если нет глобальной, возвращаем локальную
     return get_local_role(uid, peer_id)
 
 def has_rights(uid, peer_id, min_role):
-    # Владелец бота имеет все права
     if uid == OWNER_ID:
         return True
-    
-    # Проверяем глобальную роль
     global_role = get_global_role(uid)
     if global_role != 'user':
         return ALL_ROLES.get(global_role, 0) >= ALL_ROLES.get(min_role, 0)
-    
-    # Проверяем локальную роль в чате
     local_role = get_local_role(uid, peer_id)
     return ALL_ROLES.get(local_role, 0) >= ALL_ROLES.get(min_role, 0)
 
@@ -209,10 +209,6 @@ def add_warn(uid, peer_id, admin_id, reason):
 
 def remove_warn(uid, peer_id):
     cur.execute("UPDATE warns SET count = count - 1 WHERE user_id=? AND peer_id=? AND count > 0", (uid, peer_id))
-    conn.commit()
-
-def clear_warns(uid, peer_id):
-    cur.execute("DELETE FROM warns WHERE user_id=? AND peer_id=?", (uid, peer_id))
     conn.commit()
 
 def clear_all_warns(peer_id):
@@ -308,10 +304,6 @@ def add_server_chat(peer_id):
     cur.execute("INSERT OR REPLACE INTO chats (peer_id, server) VALUES (?,?)", (peer_id, 'server'))
     conn.commit()
 
-def remove_server_chat(peer_id):
-    cur.execute("DELETE FROM chats WHERE peer_id=?", (peer_id,))
-    conn.commit()
-
 def get_server_chats():
     cur.execute("SELECT peer_id FROM chats WHERE server='server'")
     return [row[0] for row in cur.fetchall()]
@@ -344,7 +336,9 @@ def remove_bug_receiver(uid):
 # ==================== VK ФУНКЦИИ ====================
 vk_session = vk_api.VkApi(token=TOKEN)
 vk = vk_session.get_api()
-longpoll = VkLongPoll(vk_session)
+
+# ИСПРАВЛЕНО: используем VkBotLongPoll для получения событий о новых участниках
+bot_longpoll = VkBotLongPoll(vk_session, GROUP_ID)
 
 def send(peer, text, reply_to=None):
     try:
@@ -454,12 +448,20 @@ print("=" * 50)
 print("💬 Ожидание сообщений...\n")
 
 def handle_message(event):
-    text = event.text.strip()
-    peer = event.peer_id
-    uid = event.user_id
-    msg_id = event.message_id
+    text = event.object.message['text'].strip() if hasattr(event.object, 'message') else ''
+    peer = event.object.message['peer_id'] if hasattr(event.object, 'message') else 0
+    uid = event.object.message['from_id'] if hasattr(event.object, 'message') else 0
+    msg_id = event.object.message['id'] if hasattr(event.object, 'message') else 0
+    
+    if not text:
+        return
+    
     cmd = text.split()[0].lower() if text else ''
     args = text.split()[1:] if len(text.split()) > 1 else []
+    
+    # Проверки для сообщений
+    if peer == 0:
+        return
     
     # Проверка на мут и бан
     if is_muted(uid, peer) and not has_rights(uid, peer, 'moder'):
@@ -650,12 +652,10 @@ def handle_message(event):
     if cmd == '/staff' and has_rights(uid, peer, 'moder'):
         text = "👮 **ПОЛЬЗОВАТЕЛИ С РОЛЯМИ**\n━━━━━━━━━━━━━━━━━━━━\n"
         
-        # Глобальные роли
         cur.execute("SELECT user_id, role FROM global_roles WHERE role != 'user'")
         for uid2, role in cur.fetchall():
             text += f"🌍 {role} (глобал): {get_user_name(uid2)}\n"
         
-        # Локальные роли в этом чате
         cur.execute("SELECT user_id, role FROM local_roles WHERE peer_id=? AND role != 'user'", (peer,))
         for uid2, role in cur.fetchall():
             if get_global_role(uid2) == 'user':
@@ -1230,9 +1230,7 @@ def handle_message(event):
             return
         target = get_user_id(args[0])
         if target:
-            # Удаляем глобальную роль
             remove_global_role(target)
-            # Удаляем все локальные роли
             for chat in get_server_chats():
                 remove_local_role(target, chat)
             remove_local_role(target, peer)
@@ -1282,7 +1280,6 @@ def handle_message(event):
             send(peer, "❌ Использование: /clearchat ID_беседы")
             return
         target_peer = int(args[0])
-        # Удаляем все данные чата
         cur.execute("DELETE FROM local_roles WHERE peer_id=?", (target_peer,))
         cur.execute("DELETE FROM nicks WHERE peer_id=?", (target_peer,))
         cur.execute("DELETE FROM warns WHERE peer_id=?", (target_peer,))
@@ -1355,29 +1352,28 @@ def handle_message(event):
         send(peer, f"❓ Неизвестная команда. Напиши /help для списка всех команд")
         return
 
-# ==================== ОБРАБОТКА НОВЫХ УЧАСТНИКОВ ====================
+# ==================== ОСНОВНОЙ ЦИКЛ ====================
 print("💬 Ожидание сообщений...\n")
 
-for event in longpoll.listen():
-    if event.type == VkEventType.MESSAGE_NEW and event.text:
-        try:
-            # Проверка на бан чата
-            if is_chat_banned(event.peer_id) and event.user_id != OWNER_ID:
-                continue
+for event in bot_longpoll.listen():
+    try:
+        # Обработка новых сообщений
+        if event.type == VkBotEventType.MESSAGE_NEW:
             handle_message(event)
-        except Exception as e:
-            print(f"Ошибка: {e}")
+        
+        # Обработка новых участников
+        elif event.type == VkBotEventType.GROUP_JOIN:
             try:
-                send(event.peer_id, f"❌ Ошибка: {str(e)[:100]}")
+                peer_id = event.obj.message['peer_id'] if hasattr(event.obj, 'message') else 0
+                user_id = event.obj.user_id
+                if peer_id and user_id:
+                    welcome = get_welcometext(peer_id)
+                    if welcome:
+                        welcome = welcome.replace("{user}", get_mention(user_id, peer_id))
+                        send(peer_id, welcome)
             except:
                 pass
-    
-    # Приветствие новых участников
-    elif event.type == VkEventType.GROUP_JOIN and event.user_id:
-        try:
-            welcome = get_welcometext(event.peer_id)
-            if welcome:
-                welcome = welcome.replace("{user}", get_mention(event.user_id, event.peer_id))
-                send(event.peer_id, welcome)
-        except:
-            pass
+                
+    except Exception as e:
+        print(f"Ошибка в основном цикле: {e}")
+        time.sleep(1)
