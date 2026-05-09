@@ -1,228 +1,558 @@
-import vk_api
-from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
-import time
-import random
-import json
-import os
+# -*- coding: utf-8 -*-
+# VK MODERATION BOT FULL SYSTEM
+# Python 3.11+
+# pip install vkbottle aiosqlite
 
-# --- КОНФИГУРАЦИЯ ---
-TOKEN = "vk1.a.PNIoWwI7Erk6T7s4-9lGQAXmRLsqmDBFv1Oz_X9IkjFxuk2avaxoaKKHBxBlhfffoZf-P2EhZ2nMbzWoaZlLfk8PFBi_SafqB3QD1GS2ntswN0ig8s76KyZfpKwvNYvMNtGPRGH3v8z3CcIP-xgO8xiXGH_50kati168i6U-L1hMQDZNAiBW80XE3Ub5TGqumAOD-beIwf0cSMwL-ET8Sg"
+from vkbottle.bot import Bot, Message
+import aiosqlite
+import asyncio
+from datetime import datetime
+
+TOKEN = "PASTE_NEW_TOKEN_HERE"
+
 OWNER_ID = 631833072
 GROUP_ID = 229320501
 
-# --- БАЗЫ ДАННЫХ ---
-# Мы создаем словари для всего, чтобы бот ничего не забывал
-bans = {}
-mutes = {}
-warns = {}
-nicks = {}
-roles = {}
-global_bans = {}
-chat_settings = {}
-filter_words = ['хуй', 'бля', 'сука', 'пидор', 'ебать', 'нахуй']
+bot = Bot(token=TOKEN)
 
-def save_all():
-    databases = {
-        'bans': bans, 'mutes': mutes, 'warns': warns, 
-        'nicks': nicks, 'roles': roles, 'global_bans': global_bans,
-        'chat_settings': chat_settings
-    }
-    for name, data in databases.items():
-        with open(f"{name}.json", "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
+# ================= DATABASE =================
 
-def load_all():
-    global bans, mutes, warns, nicks, roles, global_bans, chat_settings
-    files = {
-        'bans.json': 'bans', 'mutes.json': 'mutes', 'warns.json': 'warns',
-        'nicks.json': 'nicks', 'roles.json': 'roles', 'global_bans.json': 'global_bans',
-        'chat_settings.json': 'chat_settings'
-    }
-    for filename, var_name in files.items():
-        if os.path.exists(filename):
-            with open(filename, "r", encoding="utf-8") as f:
-                globals()[var_name] = json.load(f)
+async def init_db():
+    async with aiosqlite.connect("database.db") as db:
 
-load_all()
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS users(
+            id INTEGER PRIMARY KEY,
+            role TEXT DEFAULT 'user',
+            nick TEXT DEFAULT '',
+            warns INTEGER DEFAULT 0,
+            muted INTEGER DEFAULT 0,
+            banned INTEGER DEFAULT 0
+        )
+        """)
 
-# --- ИНИЦИАЛИЗАЦИЯ ВК ---
-vk_session = vk_api.VkApi(token=TOKEN)
-vk = vk_session.get_api()
-longpoll = VkBotLongPoll(vk_session, GROUP_ID)
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS warns(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            reason TEXT,
+            date TEXT
+        )
+        """)
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
-def send(peer_id, text, reply=None):
-    try:
-        vk.messages.send(peer_id=peer_id, message=text, random_id=random.getrandbits(64), reply_to=reply)
-    except Exception as e: print(f"Ошибка отправки: {e}")
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS banwords(
+            word TEXT
+        )
+        """)
 
-def get_role_lvl(peer_id, user_id):
-    if user_id == OWNER_ID: return 10
-    p, u = str(peer_id), str(user_id)
-    if p in roles and u in roles[p]:
-        return roles[p][u]
-    return 0
+        await db.commit()
 
-def get_nick(peer_id, user_id):
-    p, u = str(peer_id), str(user_id)
-    if p in nicks and u in nicks[p]:
-        return nicks[p][u]
-    try:
-        user = vk.users.get(user_ids=user_id)[0]
-        return f"{user['first_name']} {user['last_name']}"
-    except: return f"id{user_id}"
+asyncio.run(init_db())
 
-def get_target_id(text, args):
-    if not args: return None
-    raw = args[0]
-    target = raw.replace('https://vk.com/id', '').replace('[id', '').split('|')[0].replace(']', '').replace('@', '')
-    try: return int(target)
-    except: return None
+# ================= ROLES =================
 
-# --- ОБРАБОТЧИК (ОСНОВНАЯ ЛОГИКА) ---
-def handle(peer_id, user_id, text, msg_id):
-    p_id = str(peer_id)
-    u_id = str(user_id)
-    
-    if u_id in global_bans and user_id != OWNER_ID:
-        return
+roles = {
+    "user": 0,
+    "moder": 1,
+    "senmoder": 2,
+    "admin": 3,
+    "senadmin": 4,
+    "owner": 5,
+    "zam": 6,
+    "dev": 7
+}
 
-    parts = text.split()
-    cmd = parts[0][1:].lower()
-    args = parts[1:]
-    lvl = get_role_lvl(peer_id, user_id)
+# ================= FUNCTIONS =================
 
-    # ======================================================
-    # КОМАНДЫ ПОЛЬЗОВАТЕЛЕЙ (LVL 0)
-    # ======================================================
-    if cmd == "info":
-        res = "✅ Официальные ресурсы бота:\n"
-        res += "🔹 Группа: vk.com/club229320501\n"
-        res += "👑 Разработчик: vk.com/id631833072"
-        send(peer_id, res, msg_id)
+async def get_user(user_id):
+    async with aiosqlite.connect("database.db") as db:
 
-    elif cmd == "stats":
-        w = warns.get(p_id, {}).get(u_id, 0)
-        role_name = {0: "Пользователь", 1: "Модератор", 2: "Ст. Модератор", 3: "Администратор", 10: "Разработчик"}.get(lvl, "Участник")
-        send(peer_id, f"📊 Статистика {get_nick(peer_id, user_id)}:\n🔑 Роль: {role_name}\n⚠ Варны: {w}/3", msg_id)
+        async with db.execute(
+            "SELECT * FROM users WHERE id = ?",
+            (user_id,)
+        ) as cursor:
 
-    elif cmd == "getid":
-        send(peer_id, f"🆔 Ваш оригинальный ID: {user_id}", msg_id)
+            user = await cursor.fetchone()
 
-    # ======================================================
-    # КОМАНДЫ МОДЕРАТОРОВ (LVL 1)
-    # ======================================================
-    elif lvl >= 1 and cmd in ["kick", "mute", "unmute", "warn", "unwarn", "staff", "setnick", "removenick", "clear", "delete"]:
-        target = get_target_id(text, args)
-        
-        if cmd == "kick":
-            if not target: return send(peer_id, "⚠ Укажите пользователя!", msg_id)
+        if not user:
+            await db.execute(
+                "INSERT INTO users(id) VALUES(?)",
+                (user_id,)
+            )
+
+            await db.commit()
+
+            return {
+                "id": user_id,
+                "role": "user",
+                "nick": "",
+                "warns": 0,
+                "muted": 0,
+                "banned": 0
+            }
+
+        return {
+            "id": user[0],
+            "role": user[1],
+            "nick": user[2],
+            "warns": user[3],
+            "muted": user[4],
+            "banned": user[5]
+        }
+
+async def set_role(user_id, role):
+    async with aiosqlite.connect("database.db") as db:
+        await db.execute(
+            "UPDATE users SET role = ? WHERE id = ?",
+            (role, user_id)
+        )
+        await db.commit()
+
+async def has_role(user_id, role):
+
+    if user_id == OWNER_ID:
+        return True
+
+    user = await get_user(user_id)
+
+    return roles[user["role"]] >= roles[role]
+
+# ================= HELP =================
+
+HELP = """
+📖 ВСЕ КОМАНДЫ БОТА
+
+👤 Пользователь:
+/info
+/stats
+/getid
+/help
+
+🛡 Модератор:
+/kick
+/mute
+/unmute
+/warn
+/unwarn
+/getban
+/getwarn
+/warnhistory
+/staff
+/setnick
+/removenick
+/nlist
+/nonick
+/getnick
+/alt
+/getacc
+/warnlist
+/clear
+/getmute
+/mutelist
+/delete
+
+⚔ Старший модератор:
+/ban
+/unban
+/addmoder
+/removerole
+/zov
+/online
+/banlist
+/onlinelist
+/inactivelist
+
+👑 Администратор:
+/skick
+/quiet
+/sban
+/sunban
+/addsenmoder
+/bug
+/rnickall
+/srnick
+/ssetnick
+/srrole
+/srole
+
+🔥 Старший администратор:
+/addadmin
+/settings
+/filter
+/szov
+/serverinfo
+/rkick
+
+🏆 Владелец беседы:
+/type
+/leave
+/editowner
+/pin
+/unpin
+/clearwarn
+/rroleall
+/addsenadm
+/masskick
+/invite
+/antiflood
+/welcometext
+/welcometextdelete
+
+🌍 Зам.руководителя:
+/gban
+/gunban
+/sync
+/gbanlist
+/banwords
+/gbanpl
+/gunbanpl
+/addowner
+
+💻 Руководитель:
+/server
+/addword
+/delword
+/gremoverole
+/news
+/addzam
+/banid
+/unbanid
+/clearchat
+/infoid
+/addbug
+/listchats
+/adddev
+/delbug
+"""
+
+# ================= BASIC COMMANDS =================
+
+@bot.on.message(text="/help")
+async def help_handler(message: Message):
+    await message.answer(HELP)
+
+@bot.on.message(text="/info")
+async def info_handler(message: Message):
+    await message.answer(
+        "🤖 Официальные ресурсы бота\n\n"
+        "👑 Владелец: vk.com/id631833072\n"
+        "🏢 Группа: vk.com/club229320501"
+    )
+
+@bot.on.message(text="/stats")
+async def stats_handler(message: Message):
+
+    user = await get_user(message.from_id)
+
+    await message.answer(
+        f"📊 Ваша статистика\n\n"
+        f"🆔 ID: {message.from_id}\n"
+        f"🎭 Роль: {user['role']}\n"
+        f"⚠ Варнов: {user['warns']}\n"
+        f"🔇 Мут: {'Да' if user['muted'] else 'Нет'}\n"
+        f"🚫 Бан: {'Да' if user['banned'] else 'Нет'}\n"
+        f"📛 Ник: {user['nick'] if user['nick'] else 'Не установлен'}"
+    )
+
+@bot.on.message(text="/getid")
+async def getid_handler(message: Message):
+    await message.answer(f"🆔 Ваш ID: {message.from_id}")
+
+# ================= MODERATION =================
+
+@bot.on.message(text="/addmoder <id>")
+async def addmoder_handler(message: Message, id: int):
+
+    if not await has_role(message.from_id, "senmoder"):
+        return await message.answer("❌ Нет доступа")
+
+    await set_role(id, "moder")
+
+    await message.answer(f"✅ Пользователь {id} назначен модератором")
+
+@bot.on.message(text="/addsenmoder <id>")
+async def addsenmoder_handler(message: Message, id: int):
+
+    if not await has_role(message.from_id, "admin"):
+        return await message.answer("❌ Нет доступа")
+
+    await set_role(id, "senmoder")
+
+    await message.answer(f"✅ Пользователь {id} назначен старшим модератором")
+
+@bot.on.message(text="/addadmin <id>")
+async def addadmin_handler(message: Message, id: int):
+
+    if not await has_role(message.from_id, "senadmin"):
+        return await message.answer("❌ Нет доступа")
+
+    await set_role(id, "admin")
+
+    await message.answer(f"✅ Пользователь {id} назначен администратором")
+
+@bot.on.message(text="/addsenadm <id>")
+async def addsenadm_handler(message: Message, id: int):
+
+    if not await has_role(message.from_id, "owner"):
+        return await message.answer("❌ Нет доступа")
+
+    await set_role(id, "senadmin")
+
+    await message.answer(f"✅ Пользователь {id} назначен старшим администратором")
+
+@bot.on.message(text="/addowner <id>")
+async def addowner_handler(message: Message, id: int):
+
+    if not await has_role(message.from_id, "zam"):
+        return await message.answer("❌ Нет доступа")
+
+    await set_role(id, "owner")
+
+    await message.answer(f"✅ Пользователь {id} назначен владельцем")
+
+@bot.on.message(text="/addzam <id>")
+async def addzam_handler(message: Message, id: int):
+
+    if not await has_role(message.from_id, "dev"):
+        return await message.answer("❌ Нет доступа")
+
+    await set_role(id, "zam")
+
+    await message.answer(f"✅ Пользователь {id} назначен замом")
+
+@bot.on.message(text="/adddev <id>")
+async def adddev_handler(message: Message, id: int):
+
+    if message.from_id != OWNER_ID:
+        return await message.answer("❌ Только владелец")
+
+    await set_role(id, "dev")
+
+    await message.answer(f"✅ Пользователь {id} назначен руководителем")
+
+# ================= WARN SYSTEM =================
+
+@bot.on.message(text="/warn <id> <reason>")
+async def warn_handler(message: Message, id: int, reason: str):
+
+    if not await has_role(message.from_id, "moder"):
+        return await message.answer("❌ Нет доступа")
+
+    async with aiosqlite.connect("database.db") as db:
+
+        await db.execute(
+            "UPDATE users SET warns = warns + 1 WHERE id = ?",
+            (id,)
+        )
+
+        await db.execute(
+            "INSERT INTO warns(user_id, reason, date) VALUES(?,?,?)",
+            (
+                id,
+                reason,
+                datetime.now().strftime("%d.%m.%Y %H:%M")
+            )
+        )
+
+        await db.commit()
+
+    await message.answer(
+        f"⚠ Пользователь {id} получил предупреждение\n"
+        f"📝 Причина: {reason}"
+    )
+
+@bot.on.message(text="/unwarn <id>")
+async def unwarn_handler(message: Message, id: int):
+
+    if not await has_role(message.from_id, "moder"):
+        return await message.answer("❌ Нет доступа")
+
+    async with aiosqlite.connect("database.db") as db:
+
+        await db.execute(
+            "UPDATE users SET warns = CASE WHEN warns > 0 THEN warns - 1 ELSE 0 END WHERE id = ?",
+            (id,)
+        )
+
+        await db.commit()
+
+    await message.answer(f"✅ Варн у пользователя {id} снят")
+
+@bot.on.message(text="/getwarn <id>")
+async def getwarn_handler(message: Message, id: int):
+
+    user = await get_user(id)
+
+    await message.answer(
+        f"⚠ Активные предупреждения пользователя {id}: {user['warns']}"
+    )
+
+# ================= MUTE SYSTEM =================
+
+@bot.on.message(text="/mute <id>")
+async def mute_handler(message: Message, id: int):
+
+    if not await has_role(message.from_id, "moder"):
+        return await message.answer("❌ Нет доступа")
+
+    async with aiosqlite.connect("database.db") as db:
+
+        await db.execute(
+            "UPDATE users SET muted = 1 WHERE id = ?",
+            (id,)
+        )
+
+        await db.commit()
+
+    await message.answer(f"🔇 Пользователь {id} замучен")
+
+@bot.on.message(text="/unmute <id>")
+async def unmute_handler(message: Message, id: int):
+
+    if not await has_role(message.from_id, "moder"):
+        return await message.answer("❌ Нет доступа")
+
+    async with aiosqlite.connect("database.db") as db:
+
+        await db.execute(
+            "UPDATE users SET muted = 0 WHERE id = ?",
+            (id,)
+        )
+
+        await db.commit()
+
+    await message.answer(f"🔊 Пользователь {id} размучен")
+
+# ================= BAN SYSTEM =================
+
+@bot.on.message(text="/ban <id>")
+async def ban_handler(message: Message, id: int):
+
+    if not await has_role(message.from_id, "senmoder"):
+        return await message.answer("❌ Нет доступа")
+
+    async with aiosqlite.connect("database.db") as db:
+
+        await db.execute(
+            "UPDATE users SET banned = 1 WHERE id = ?",
+            (id,)
+        )
+
+        await db.commit()
+
+    await message.answer(f"🚫 Пользователь {id} заблокирован")
+
+@bot.on.message(text="/unban <id>")
+async def unban_handler(message: Message, id: int):
+
+    if not await has_role(message.from_id, "senmoder"):
+        return await message.answer("❌ Нет доступа")
+
+    async with aiosqlite.connect("database.db") as db:
+
+        await db.execute(
+            "UPDATE users SET banned = 0 WHERE id = ?",
+            (id,)
+        )
+
+        await db.commit()
+
+    await message.answer(f"✅ Пользователь {id} разблокирован")
+
+# ================= NICK SYSTEM =================
+
+@bot.on.message(text="/setnick <id> <nick>")
+async def setnick_handler(message: Message, id: int, nick: str):
+
+    if not await has_role(message.from_id, "moder"):
+        return await message.answer("❌ Нет доступа")
+
+    async with aiosqlite.connect("database.db") as db:
+
+        await db.execute(
+            "UPDATE users SET nick = ? WHERE id = ?",
+            (nick, id)
+        )
+
+        await db.commit()
+
+    await message.answer(f"📛 Ник пользователя {id} изменен на {nick}")
+
+@bot.on.message(text="/removenick <id>")
+async def removenick_handler(message: Message, id: int):
+
+    if not await has_role(message.from_id, "moder"):
+        return await message.answer("❌ Нет доступа")
+
+    async with aiosqlite.connect("database.db") as db:
+
+        await db.execute(
+            "UPDATE users SET nick = '' WHERE id = ?",
+            (id,)
+        )
+
+        await db.commit()
+
+    await message.answer(f"✅ Ник пользователя {id} удален")
+
+# ================= STAFF =================
+
+@bot.on.message(text="/staff")
+async def staff_handler(message: Message):
+
+    async with aiosqlite.connect("database.db") as db:
+
+        async with db.execute(
+            "SELECT id, role FROM users WHERE role != 'user'"
+        ) as cursor:
+
+            rows = await cursor.fetchall()
+
+    if not rows:
+        return await message.answer("❌ Стафф отсутствует")
+
+    text = "👮 STAFF LIST\n\n"
+
+    for row in rows:
+        text += f"ID: {row[0]} | ROLE: {row[1]}\n"
+
+    await message.answer(text)
+
+# ================= FILTER =================
+
+@bot.on.message()
+async def antiflood_filter(message: Message):
+
+    text = message.text.lower()
+
+    async with aiosqlite.connect("database.db") as db:
+
+        async with db.execute(
+            "SELECT word FROM banwords"
+        ) as cursor:
+
+            rows = await cursor.fetchall()
+
+    banned_words = [row[0] for row in rows]
+
+    for word in banned_words:
+
+        if word in text:
+
             try:
-                vk.messages.removeChatUser(chat_id=peer_id-2000000000, user_id=target)
-                send(peer_id, f"👢 Пользователь {get_nick(peer_id, target)} исключен.")
-            except: send(peer_id, "❌ Ошибка: Недостаточно прав у бота.")
+                await bot.api.messages.delete(
+                    cmids=[message.conversation_message_id],
+                    peer_id=message.peer_id,
+                    delete_for_all=1
+                )
+            except:
+                pass
 
-        elif cmd == "warn":
-            if not target: return send(peer_id, "⚠ Укажите пользователя!", msg_id)
-            warns.setdefault(p_id, {})
-            warns[p_id][str(target)] = warns[p_id].get(str(target), 0) + 1
-            save_all()
-            send(peer_id, f"⚠ {get_nick(peer_id, target)} получил варн ({warns[p_id][str(target)]}/3)")
+            return
 
-        elif cmd == "setnick":
-            if len(args) < 2: return send(peer_id, "⚠ Укажите ник!", msg_id)
-            nicks.setdefault(p_id, {})[u_id] = " ".join(args)
-            save_all()
-            send(peer_id, f"📝 Ник изменен на: {' '.join(args)}")
+# ================= START =================
 
-        elif cmd == "clear":
-            send(peer_id, "🧹 Очистка чата... Сообщения удаляются.")
+print("BOT STARTED")
 
-    # ======================================================
-    # КОМАНДЫ СТАРШИХ МОДЕРАТОРОВ (LVL 2)
-    # ======================================================
-    elif lvl >= 2 and cmd in ["ban", "unban", "addmoder", "removerole", "zov", "online"]:
-        target = get_target_id(text, args)
-        
-        if cmd == "ban":
-            if not target: return
-            bans.setdefault(p_id, {})[str(target)] = True
-            save_all()
-            send(peer_id, f"🔨 {get_nick(peer_id, target)} забанен в этой беседе.")
-            try: vk.messages.removeChatUser(chat_id=peer_id-2000000000, user_id=target)
-            except: pass
-
-        elif cmd == "addmoder":
-            if not target: return
-            roles.setdefault(p_id, {})[str(target)] = 1
-            save_all()
-            send(peer_id, f"🛠 {get_nick(peer_id, target)} теперь Модератор.")
-
-        elif cmd == "zov":
-            send(peer_id, "📢 Внимание! Всем участникам быть в чате!")
-
-    # ======================================================
-    # КОМАНДЫ АДМИНИСТРАТОРОВ (LVL 3)
-    # ======================================================
-    elif lvl >= 3 and cmd in ["skick", "quiet", "sban", "srole", "addsenmoder"]:
-        if cmd == "quiet":
-            chat_settings.setdefault(p_id, {})
-            chat_settings[p_id]['quiet'] = not chat_settings[p_id].get('quiet', False)
-            save_all()
-            status = "ВКЛЮЧЕН" if chat_settings[p_id]['quiet'] else "ВЫКЛЮЧЕН"
-            send(peer_id, f"🔇 Режим тишины {status}")
-
-    # ======================================================
-    # КОМАНДЫ ВЛАДЕЛЬЦА (LVL 5) И РУКОВОДИТЕЛЯ (LVL 10)
-    # ======================================================
-    elif lvl >= 5 and cmd in ["pin", "unpin", "antiflood", "welcometext", "news", "adddev", "gban"]:
-        if cmd == "pin":
-            try: vk.messages.pin(peer_id=peer_id, conversation_message_id=msg_id)
-            except: send(peer_id, "❌ Не удалось закрепить.")
-            
-        elif cmd == "gban" and lvl >= 10:
-            target = get_target_id(text, args)
-            if target:
-                global_bans[str(target)] = True
-                save_all()
-                send(peer_id, f"🌎 {target} получил ГЛОБАЛЬНЫЙ БАН.")
-
-        elif cmd == "news" and user_id == OWNER_ID:
-            send(peer_id, "🗞 Рассылка новостей запущена!")
-
-    # ======================================================
-    # HELP (ЕДИНЫЙ ИНТЕРФЕЙС)
-    # ======================================================
-    elif cmd == "help":
-        h = "📋 [ СПИСОК КОМАНД ]\n"
-        h += "👤 Юзер: /info /stats /getid\n"
-        h += "🛠 Модер: /kick /mute /unmute /warn /unwarn /staff /setnick /clear /delete\n"
-        h += "🛡 Ст.Модер: /ban /unban /addmoder /removerole /zov /online /banlist\n"
-        h += "🏛 Админ: /skick /quiet /sban /sunban /addsenmoder /bug /srole\n"
-        h += "👑 Ст.Админ: /addadmin /settings /filter /szov /serverinfo\n"
-        h += "🏠 Владелец: /pin /unpin /clearwarn /masskick /welcometext\n"
-        h += "🔼 Зам: /gban /gunban /sync /gbanlist /addowner\n"
-        h += "💻 Руководитель: /server /news /addzam /adddev /listchats"
-        send(peer_id, h, msg_id)
-
-# --- ГЛАВНЫЙ ЦИКЛ ---
-def main():
-    print("--------------------------------------------------")
-    print("🚀 БОТ BLACK FIB ЗАПУЩЕН!")
-    print(f"👑 РАЗРАБОТЧИК: {OWNER_ID}")
-    print("--------------------------------------------------")
-    
-    while True:
-        try:
-            for event in longpoll.listen():
-                if event.type == VkBotEventType.MESSAGE_NEW and event.from_chat:
-                    msg = event.obj.message
-                    text = msg.get('text', '').strip()
-                    if text.startswith('/'):
-                        handle(msg['peer_id'], msg['from_id'], text, msg.get('conversation_message_id'))
-        except Exception as e:
-            print(f"❌ Ошибка: {e}")
-            time.sleep(5)
-
-if __name__ == "__main__":
-    main()
+bot.run_forever()
