@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# VK MODERATION BOT FULL SYSTEM
+# FULL VK BOT SYSTEM
 # Python 3.11+
 # pip install vkbottle aiosqlite
 
@@ -8,16 +8,21 @@ import aiosqlite
 import asyncio
 from datetime import datetime
 
-TOKEN = "PASTE_NEW_TOKEN_HERE"
+# ================= CONFIG =================
+
+TOKEN = "vk1.a.PNIoWwI7Erk6T7s4-9lGQAXmRLsqmDBFv1Oz_X9IkjFxuk2avaxoaKKHBxBlhfffoZf-P2EhZ2nMbzWoaZlLfk8PFBi_SafqB3QD1GS2ntswN0ig8s76KyZfpKwvNYvMNtGPRGH3v8z3CcIP-xgO8xiXGH_50kati168i6U-L1hMQDZNAiBW80XE3Ub5TGqumAOD-beIwf0cSMwL-ET8Sg"
 
 OWNER_ID = 631833072
 GROUP_ID = 229320501
+
+PREFIX = "/"
 
 bot = Bot(token=TOKEN)
 
 # ================= DATABASE =================
 
 async def init_db():
+
     async with aiosqlite.connect("database.db") as db:
 
         await db.execute("""
@@ -37,6 +42,15 @@ async def init_db():
             user_id INTEGER,
             reason TEXT,
             date TEXT
+        )
+        """)
+
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS settings(
+            chat_id INTEGER PRIMARY KEY,
+            antiflood INTEGER DEFAULT 0,
+            filter INTEGER DEFAULT 0,
+            quiet INTEGER DEFAULT 0
         )
         """)
 
@@ -66,6 +80,7 @@ roles = {
 # ================= FUNCTIONS =================
 
 async def get_user(user_id):
+
     async with aiosqlite.connect("database.db") as db:
 
         async with db.execute(
@@ -76,6 +91,7 @@ async def get_user(user_id):
             user = await cursor.fetchone()
 
         if not user:
+
             await db.execute(
                 "INSERT INTO users(id) VALUES(?)",
                 (user_id,)
@@ -102,11 +118,14 @@ async def get_user(user_id):
         }
 
 async def set_role(user_id, role):
+
     async with aiosqlite.connect("database.db") as db:
+
         await db.execute(
             "UPDATE users SET role = ? WHERE id = ?",
             (role, user_id)
         )
+
         await db.commit()
 
 async def has_role(user_id, role):
@@ -121,13 +140,13 @@ async def has_role(user_id, role):
 # ================= HELP =================
 
 HELP = """
-📖 ВСЕ КОМАНДЫ БОТА
+📖 ВСЕ КОМАНДЫ
 
 👤 Пользователь:
+/help
 /info
 /stats
 /getid
-/help
 
 🛡 Модератор:
 /kick
@@ -135,109 +154,63 @@ HELP = """
 /unmute
 /warn
 /unwarn
-/getban
 /getwarn
-/warnhistory
-/staff
+/getmute
 /setnick
 /removenick
-/nlist
-/nonick
 /getnick
-/alt
-/getacc
-/warnlist
-/clear
-/getmute
-/mutelist
-/delete
+/staff
 
 ⚔ Старший модератор:
 /ban
 /unban
 /addmoder
 /removerole
-/zov
-/online
-/banlist
-/onlinelist
-/inactivelist
 
 👑 Администратор:
-/skick
-/quiet
-/sban
-/sunban
 /addsenmoder
-/bug
-/rnickall
-/srnick
-/ssetnick
-/srrole
-/srole
+/addadmin
+/clear
+/delete
+/online
 
 🔥 Старший администратор:
-/addadmin
 /settings
 /filter
-/szov
 /serverinfo
-/rkick
 
-🏆 Владелец беседы:
-/type
-/leave
-/editowner
-/pin
-/unpin
-/clearwarn
-/rroleall
+🏆 Владелец:
 /addsenadm
 /masskick
-/invite
 /antiflood
 /welcometext
-/welcometextdelete
 
-🌍 Зам.руководителя:
+🌍 Зам:
 /gban
 /gunban
-/sync
-/gbanlist
-/banwords
-/gbanpl
-/gunbanpl
 /addowner
 
 💻 Руководитель:
-/server
+/addzam
+/adddev
 /addword
 /delword
-/gremoverole
-/news
-/addzam
-/banid
-/unbanid
-/clearchat
-/infoid
-/addbug
-/listchats
-/adddev
-/delbug
 """
 
-# ================= BASIC COMMANDS =================
+# ================= BASIC =================
 
 @bot.on.message(text="/help")
 async def help_handler(message: Message):
+
     await message.answer(HELP)
 
 @bot.on.message(text="/info")
 async def info_handler(message: Message):
+
     await message.answer(
-        "🤖 Официальные ресурсы бота\n\n"
-        "👑 Владелец: vk.com/id631833072\n"
-        "🏢 Группа: vk.com/club229320501"
+        "🤖 VK BOT SYSTEM\n"
+        "👑 OWNER: vk.com/id631833072\n"
+        "🏢 GROUP: club229320501"
     )
 
 @bot.on.message(text="/stats")
@@ -246,98 +219,29 @@ async def stats_handler(message: Message):
     user = await get_user(message.from_id)
 
     await message.answer(
-        f"📊 Ваша статистика\n\n"
+        f"📊 СТАТИСТИКА\n\n"
         f"🆔 ID: {message.from_id}\n"
-        f"🎭 Роль: {user['role']}\n"
-        f"⚠ Варнов: {user['warns']}\n"
-        f"🔇 Мут: {'Да' if user['muted'] else 'Нет'}\n"
-        f"🚫 Бан: {'Да' if user['banned'] else 'Нет'}\n"
-        f"📛 Ник: {user['nick'] if user['nick'] else 'Не установлен'}"
+        f"🎭 ROLE: {user['role']}\n"
+        f"⚠ WARNS: {user['warns']}\n"
+        f"🔇 MUTE: {'YES' if user['muted'] else 'NO'}\n"
+        f"🚫 BAN: {'YES' if user['banned'] else 'NO'}\n"
+        f"📛 NICK: {user['nick'] if user['nick'] else 'NONE'}"
     )
 
 @bot.on.message(text="/getid")
 async def getid_handler(message: Message):
-    await message.answer(f"🆔 Ваш ID: {message.from_id}")
 
-# ================= MODERATION =================
+    await message.answer(
+        f"🆔 YOUR ID: {message.from_id}"
+    )
 
-@bot.on.message(text="/addmoder <id>")
-async def addmoder_handler(message: Message, id: int):
-
-    if not await has_role(message.from_id, "senmoder"):
-        return await message.answer("❌ Нет доступа")
-
-    await set_role(id, "moder")
-
-    await message.answer(f"✅ Пользователь {id} назначен модератором")
-
-@bot.on.message(text="/addsenmoder <id>")
-async def addsenmoder_handler(message: Message, id: int):
-
-    if not await has_role(message.from_id, "admin"):
-        return await message.answer("❌ Нет доступа")
-
-    await set_role(id, "senmoder")
-
-    await message.answer(f"✅ Пользователь {id} назначен старшим модератором")
-
-@bot.on.message(text="/addadmin <id>")
-async def addadmin_handler(message: Message, id: int):
-
-    if not await has_role(message.from_id, "senadmin"):
-        return await message.answer("❌ Нет доступа")
-
-    await set_role(id, "admin")
-
-    await message.answer(f"✅ Пользователь {id} назначен администратором")
-
-@bot.on.message(text="/addsenadm <id>")
-async def addsenadm_handler(message: Message, id: int):
-
-    if not await has_role(message.from_id, "owner"):
-        return await message.answer("❌ Нет доступа")
-
-    await set_role(id, "senadmin")
-
-    await message.answer(f"✅ Пользователь {id} назначен старшим администратором")
-
-@bot.on.message(text="/addowner <id>")
-async def addowner_handler(message: Message, id: int):
-
-    if not await has_role(message.from_id, "zam"):
-        return await message.answer("❌ Нет доступа")
-
-    await set_role(id, "owner")
-
-    await message.answer(f"✅ Пользователь {id} назначен владельцем")
-
-@bot.on.message(text="/addzam <id>")
-async def addzam_handler(message: Message, id: int):
-
-    if not await has_role(message.from_id, "dev"):
-        return await message.answer("❌ Нет доступа")
-
-    await set_role(id, "zam")
-
-    await message.answer(f"✅ Пользователь {id} назначен замом")
-
-@bot.on.message(text="/adddev <id>")
-async def adddev_handler(message: Message, id: int):
-
-    if message.from_id != OWNER_ID:
-        return await message.answer("❌ Только владелец")
-
-    await set_role(id, "dev")
-
-    await message.answer(f"✅ Пользователь {id} назначен руководителем")
-
-# ================= WARN SYSTEM =================
+# ================= WARN =================
 
 @bot.on.message(text="/warn <id> <reason>")
 async def warn_handler(message: Message, id: int, reason: str):
 
     if not await has_role(message.from_id, "moder"):
-        return await message.answer("❌ Нет доступа")
+        return await message.answer("❌ НЕТ ДОСТУПА")
 
     async with aiosqlite.connect("database.db") as db:
 
@@ -358,15 +262,15 @@ async def warn_handler(message: Message, id: int, reason: str):
         await db.commit()
 
     await message.answer(
-        f"⚠ Пользователь {id} получил предупреждение\n"
-        f"📝 Причина: {reason}"
+        f"⚠ USER {id} GOT WARN\n"
+        f"📝 REASON: {reason}"
     )
 
 @bot.on.message(text="/unwarn <id>")
 async def unwarn_handler(message: Message, id: int):
 
     if not await has_role(message.from_id, "moder"):
-        return await message.answer("❌ Нет доступа")
+        return await message.answer("❌ НЕТ ДОСТУПА")
 
     async with aiosqlite.connect("database.db") as db:
 
@@ -377,7 +281,7 @@ async def unwarn_handler(message: Message, id: int):
 
         await db.commit()
 
-    await message.answer(f"✅ Варн у пользователя {id} снят")
+    await message.answer(f"✅ WARN REMOVED FROM {id}")
 
 @bot.on.message(text="/getwarn <id>")
 async def getwarn_handler(message: Message, id: int):
@@ -385,16 +289,16 @@ async def getwarn_handler(message: Message, id: int):
     user = await get_user(id)
 
     await message.answer(
-        f"⚠ Активные предупреждения пользователя {id}: {user['warns']}"
+        f"⚠ WARNS: {user['warns']}"
     )
 
-# ================= MUTE SYSTEM =================
+# ================= MUTE =================
 
 @bot.on.message(text="/mute <id>")
 async def mute_handler(message: Message, id: int):
 
     if not await has_role(message.from_id, "moder"):
-        return await message.answer("❌ Нет доступа")
+        return await message.answer("❌ НЕТ ДОСТУПА")
 
     async with aiosqlite.connect("database.db") as db:
 
@@ -405,13 +309,15 @@ async def mute_handler(message: Message, id: int):
 
         await db.commit()
 
-    await message.answer(f"🔇 Пользователь {id} замучен")
+    await message.answer(
+        f"🔇 USER {id} MUTED"
+    )
 
 @bot.on.message(text="/unmute <id>")
 async def unmute_handler(message: Message, id: int):
 
     if not await has_role(message.from_id, "moder"):
-        return await message.answer("❌ Нет доступа")
+        return await message.answer("❌ НЕТ ДОСТУПА")
 
     async with aiosqlite.connect("database.db") as db:
 
@@ -422,15 +328,26 @@ async def unmute_handler(message: Message, id: int):
 
         await db.commit()
 
-    await message.answer(f"🔊 Пользователь {id} размучен")
+    await message.answer(
+        f"🔊 USER {id} UNMUTED"
+    )
 
-# ================= BAN SYSTEM =================
+@bot.on.message(text="/getmute <id>")
+async def getmute_handler(message: Message, id: int):
+
+    user = await get_user(id)
+
+    await message.answer(
+        f"🔇 MUTE: {'YES' if user['muted'] else 'NO'}"
+    )
+
+# ================= BAN =================
 
 @bot.on.message(text="/ban <id>")
 async def ban_handler(message: Message, id: int):
 
     if not await has_role(message.from_id, "senmoder"):
-        return await message.answer("❌ Нет доступа")
+        return await message.answer("❌ НЕТ ДОСТУПА")
 
     async with aiosqlite.connect("database.db") as db:
 
@@ -441,13 +358,15 @@ async def ban_handler(message: Message, id: int):
 
         await db.commit()
 
-    await message.answer(f"🚫 Пользователь {id} заблокирован")
+    await message.answer(
+        f"🚫 USER {id} BANNED"
+    )
 
 @bot.on.message(text="/unban <id>")
 async def unban_handler(message: Message, id: int):
 
     if not await has_role(message.from_id, "senmoder"):
-        return await message.answer("❌ Нет доступа")
+        return await message.answer("❌ НЕТ ДОСТУПА")
 
     async with aiosqlite.connect("database.db") as db:
 
@@ -458,7 +377,95 @@ async def unban_handler(message: Message, id: int):
 
         await db.commit()
 
-    await message.answer(f"✅ Пользователь {id} разблокирован")
+    await message.answer(
+        f"✅ USER {id} UNBANNED"
+    )
+
+# ================= ROLE SYSTEM =================
+
+@bot.on.message(text="/addmoder <id>")
+async def addmoder_handler(message: Message, id: int):
+
+    if not await has_role(message.from_id, "senmoder"):
+        return await message.answer("❌ НЕТ ДОСТУПА")
+
+    await set_role(id, "moder")
+
+    await message.answer(
+        f"✅ USER {id} IS MODERATOR"
+    )
+
+@bot.on.message(text="/addsenmoder <id>")
+async def addsenmoder_handler(message: Message, id: int):
+
+    if not await has_role(message.from_id, "admin"):
+        return await message.answer("❌ НЕТ ДОСТУПА")
+
+    await set_role(id, "senmoder")
+
+    await message.answer(
+        f"✅ USER {id} IS SEN MODERATOR"
+    )
+
+@bot.on.message(text="/addadmin <id>")
+async def addadmin_handler(message: Message, id: int):
+
+    if not await has_role(message.from_id, "senadmin"):
+        return await message.answer("❌ НЕТ ДОСТУПА")
+
+    await set_role(id, "admin")
+
+    await message.answer(
+        f"✅ USER {id} IS ADMIN"
+    )
+
+@bot.on.message(text="/addsenadm <id>")
+async def addsenadm_handler(message: Message, id: int):
+
+    if not await has_role(message.from_id, "owner"):
+        return await message.answer("❌ НЕТ ДОСТУПА")
+
+    await set_role(id, "senadmin")
+
+    await message.answer(
+        f"✅ USER {id} IS SEN ADMIN"
+    )
+
+@bot.on.message(text="/addowner <id>")
+async def addowner_handler(message: Message, id: int):
+
+    if not await has_role(message.from_id, "zam"):
+        return await message.answer("❌ НЕТ ДОСТУПА")
+
+    await set_role(id, "owner")
+
+    await message.answer(
+        f"✅ USER {id} IS OWNER"
+    )
+
+@bot.on.message(text="/addzam <id>")
+async def addzam_handler(message: Message, id: int):
+
+    if not await has_role(message.from_id, "dev"):
+        return await message.answer("❌ НЕТ ДОСТУПА")
+
+    await set_role(id, "zam")
+
+    await message.answer(
+        f"✅ USER {id} IS ZAM"
+    )
+
+@bot.on.message(text="/adddev <id>")
+async def adddev_handler(message: Message, id: int):
+
+    if message.from_id != OWNER_ID:
+        return await message.answer("❌ ONLY OWNER")
+
+    await set_role(id, "dev")
+
+    await message.answer(
+        f"🔥 USER {id} IS DEV"
+    )
 
 # ================= NICK SYSTEM =================
 
@@ -466,7 +473,7 @@ async def unban_handler(message: Message, id: int):
 async def setnick_handler(message: Message, id: int, nick: str):
 
     if not await has_role(message.from_id, "moder"):
-        return await message.answer("❌ Нет доступа")
+        return await message.answer("❌ НЕТ ДОСТУПА")
 
     async with aiosqlite.connect("database.db") as db:
 
@@ -477,13 +484,15 @@ async def setnick_handler(message: Message, id: int, nick: str):
 
         await db.commit()
 
-    await message.answer(f"📛 Ник пользователя {id} изменен на {nick}")
+    await message.answer(
+        f"📛 USER {id} NICK -> {nick}"
+    )
 
 @bot.on.message(text="/removenick <id>")
 async def removenick_handler(message: Message, id: int):
 
     if not await has_role(message.from_id, "moder"):
-        return await message.answer("❌ Нет доступа")
+        return await message.answer("❌ НЕТ ДОСТУПА")
 
     async with aiosqlite.connect("database.db") as db:
 
@@ -494,7 +503,18 @@ async def removenick_handler(message: Message, id: int):
 
         await db.commit()
 
-    await message.answer(f"✅ Ник пользователя {id} удален")
+    await message.answer(
+        f"✅ NICK REMOVED"
+    )
+
+@bot.on.message(text="/getnick <id>")
+async def getnick_handler(message: Message, id: int):
+
+    user = await get_user(id)
+
+    await message.answer(
+        f"📛 NICK: {user['nick'] if user['nick'] else 'NONE'}"
+    )
 
 # ================= STAFF =================
 
@@ -510,7 +530,7 @@ async def staff_handler(message: Message):
             rows = await cursor.fetchall()
 
     if not rows:
-        return await message.answer("❌ Стафф отсутствует")
+        return await message.answer("❌ STAFF EMPTY")
 
     text = "👮 STAFF LIST\n\n"
 
@@ -521,8 +541,51 @@ async def staff_handler(message: Message):
 
 # ================= FILTER =================
 
+@bot.on.message(text="/addword <word>")
+async def addword_handler(message: Message, word: str):
+
+    if not await has_role(message.from_id, "dev"):
+        return await message.answer("❌ НЕТ ДОСТУПА")
+
+    async with aiosqlite.connect("database.db") as db:
+
+        await db.execute(
+            "INSERT INTO banwords(word) VALUES(?)",
+            (word.lower(),)
+        )
+
+        await db.commit()
+
+    await message.answer(
+        f"✅ WORD {word} ADDED"
+    )
+
+@bot.on.message(text="/delword <word>")
+async def delword_handler(message: Message, word: str):
+
+    if not await has_role(message.from_id, "dev"):
+        return await message.answer("❌ НЕТ ДОСТУПА")
+
+    async with aiosqlite.connect("database.db") as db:
+
+        await db.execute(
+            "DELETE FROM banwords WHERE word = ?",
+            (word.lower(),)
+        )
+
+        await db.commit()
+
+    await message.answer(
+        f"✅ WORD {word} REMOVED"
+    )
+
+# ================= MESSAGE FILTER =================
+
 @bot.on.message()
-async def antiflood_filter(message: Message):
+async def filter_system(message: Message):
+
+    if not message.text:
+        return
 
     text = message.text.lower()
 
@@ -534,18 +597,20 @@ async def antiflood_filter(message: Message):
 
             rows = await cursor.fetchall()
 
-    banned_words = [row[0] for row in rows]
+    words = [row[0] for row in rows]
 
-    for word in banned_words:
+    for word in words:
 
         if word in text:
 
             try:
+
                 await bot.api.messages.delete(
                     cmids=[message.conversation_message_id],
                     peer_id=message.peer_id,
                     delete_for_all=1
                 )
+
             except:
                 pass
 
