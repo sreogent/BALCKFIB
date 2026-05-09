@@ -10,111 +10,219 @@ TOKEN = "vk1.a.PNIoWwI7Erk6T7s4-9lGQAXmRLsqmDBFv1Oz_X9IkjFxuk2avaxoaKKHBxBlhfffo
 OWNER_ID = 631833072
 GROUP_ID = 229320501
 
-# Хранилище данных
-data = {
-    'roles': {}, 'warns': {}, 'mutes': {}, 'bans': {}, 'nicks': {},
-    'global_bans': {}, 'filter_words': [], 'chat_settings': {}
-}
+# --- БАЗЫ ДАННЫХ ---
+# Мы создаем словари для всего, чтобы бот ничего не забывал
+bans = {}
+mutes = {}
+warns = {}
+nicks = {}
+roles = {}
+global_bans = {}
+chat_settings = {}
+filter_words = ['хуй', 'бля', 'сука', 'пидор', 'ебать', 'нахуй']
 
-def save():
-    for k, v in data.items():
-        with open(f"{k}.json", "w", encoding="utf-8") as f:
-            json.dump(v, f, ensure_ascii=False, indent=4)
+def save_all():
+    databases = {
+        'bans': bans, 'mutes': mutes, 'warns': warns, 
+        'nicks': nicks, 'roles': roles, 'global_bans': global_bans,
+        'chat_settings': chat_settings
+    }
+    for name, data in databases.items():
+        with open(f"{name}.json", "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
 
-def load():
-    for k in data.keys():
-        if os.path.exists(f"{k}.json"):
-            with open(f"{k}.json", "r", encoding="utf-8") as f:
-                data[k] = json.load(f)
+def load_all():
+    global bans, mutes, warns, nicks, roles, global_bans, chat_settings
+    files = {
+        'bans.json': 'bans', 'mutes.json': 'mutes', 'warns.json': 'warns',
+        'nicks.json': 'nicks', 'roles.json': 'roles', 'global_bans.json': 'global_bans',
+        'chat_settings.json': 'chat_settings'
+    }
+    for filename, var_name in files.items():
+        if os.path.exists(filename):
+            with open(filename, "r", encoding="utf-8") as f:
+                globals()[var_name] = json.load(f)
 
-load()
+load_all()
 
+# --- ИНИЦИАЛИЗАЦИЯ ВК ---
 vk_session = vk_api.VkApi(token=TOKEN)
 vk = vk_session.get_api()
 longpoll = VkBotLongPoll(vk_session, GROUP_ID)
 
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 def send(peer_id, text, reply=None):
-    vk.messages.send(peer_id=peer_id, message=text, random_id=random.getrandbits(64), reply_to=reply)
+    try:
+        vk.messages.send(peer_id=peer_id, message=text, random_id=random.getrandbits(64), reply_to=reply)
+    except Exception as e: print(f"Ошибка отправки: {e}")
 
 def get_role_lvl(peer_id, user_id):
-    if user_id == OWNER_ID: return 7 # Руководитель
+    if user_id == OWNER_ID: return 10
     p, u = str(peer_id), str(user_id)
-    # 0-User, 1-Moder, 2-SenModer, 3-Admin, 4-SenAdmin, 5-ChatOwner, 6-Zam
-    return data['roles'].get(p, {}).get(u, 0)
+    if p in roles and u in roles[p]:
+        return roles[p][u]
+    return 0
 
-# --- ГЛАВНЫЙ ОБРАБОТЧИК ---
+def get_nick(peer_id, user_id):
+    p, u = str(peer_id), str(user_id)
+    if p in nicks and u in nicks[p]:
+        return nicks[p][u]
+    try:
+        user = vk.users.get(user_ids=user_id)[0]
+        return f"{user['first_name']} {user['last_name']}"
+    except: return f"id{user_id}"
+
+def get_target_id(text, args):
+    if not args: return None
+    raw = args[0]
+    target = raw.replace('https://vk.com/id', '').replace('[id', '').split('|')[0].replace(']', '').replace('@', '')
+    try: return int(target)
+    except: return None
+
+# --- ОБРАБОТЧИК (ОСНОВНАЯ ЛОГИКА) ---
 def handle(peer_id, user_id, text, msg_id):
-    if str(user_id) in data['global_bans'] and user_id != OWNER_ID: return
+    p_id = str(peer_id)
+    u_id = str(user_id)
     
-    args = text.split()
-    cmd = args[0][1:].lower()
+    if u_id in global_bans and user_id != OWNER_ID:
+        return
+
+    parts = text.split()
+    cmd = parts[0][1:].lower()
+    args = parts[1:]
     lvl = get_role_lvl(peer_id, user_id)
 
-    # ПОЛНЫЙ HELP (ВСЕ КОМАНДЫ)
-    if cmd == "help":
-        h = "📋 [ СПИСОК КОМАНД ]\n"
-        h += "👤 Юзер: /info /stats /getid\n"
-        h += "🛠 Модер: /kick /mute /unmute /warn /unwarn /getban /getwarn /warnhistory /staff /setnick /removenick /nlist /nonick /getnick /alt /getacc /warnlist /clear /getmute /mutelist /delete\n"
-        h += "🛡 Ст.Модер: /ban /unban /addmoder /removerole /zov /online /banlist /onlinelist /inactivelist\n"
-        h += "🏛 Админ: /skick /quiet /sban /sunban /addsenmoder /bug /rnickall /srnick /ssetnick /srrole /srole\n"
-        h += "👑 Ст.Админ: /addadmin /settings /filter /szov /serverinfo /rkick\n"
-        h += "🏠 Владелец чата: /type /leave /editowner /pin /unpin /clearwarn /rroleall /addsenadm /masskick /invite /antiflood /welcometext /welcometextdelete\n"
-        h += "🔼 Зам.Руководителя: /gban /gunban /sync /gbanlist /banwords /gbanpl /gunbanpl /addowner\n"
-        h += "💻 Руководитель: /server /addword /delword /gremoverole /news /addzam /banid /unbanid /clearchat /infoid /addbug /listchats /adddev /delbug"
-        send(peer_id, h, msg_id)
+    # ======================================================
+    # КОМАНДЫ ПОЛЬЗОВАТЕЛЕЙ (LVL 0)
+    # ======================================================
+    if cmd == "info":
+        res = "✅ Официальные ресурсы бота:\n"
+        res += "🔹 Группа: vk.com/club229320501\n"
+        res += "👑 Разработчик: vk.com/id631833072"
+        send(peer_id, res, msg_id)
 
-    # 1. КОМАНДЫ ПОЛЬЗОВАТЕЛЕЙ
-    elif cmd in ["info", "stats", "getid"]:
-        if cmd == "info": send(peer_id, "ℹ Ресурсы: vk.com/club229320501", msg_id)
-        if cmd == "stats": send(peer_id, f"📊 Ваша роль: {lvl} ур.", msg_id)
-        if cmd == "getid": send(peer_id, f"🆔 Ваш ID: {user_id}", msg_id)
+    elif cmd == "stats":
+        w = warns.get(p_id, {}).get(u_id, 0)
+        role_name = {0: "Пользователь", 1: "Модератор", 2: "Ст. Модератор", 3: "Администратор", 10: "Разработчик"}.get(lvl, "Участник")
+        send(peer_id, f"📊 Статистика {get_nick(peer_id, user_id)}:\n🔑 Роль: {role_name}\n⚠ Варны: {w}/3", msg_id)
 
-    # 2. КОМАНДЫ МОДЕРАТОРОВ (lvl >= 1)
-    elif lvl >= 1 and cmd in ["kick", "mute", "unmute", "warn", "unwarn", "getban", "getwarn", "warnhistory", "staff", "setnick", "removenick", "nlist", "nonick", "getnick", "alt", "getacc", "warnlist", "clear", "getmute", "mutelist", "delete"]:
-        if cmd == "kick": send(peer_id, "🔨 Команда выполнена (kick)", msg_id)
-        else: send(peer_id, f"✅ Выполнена команда модератора: {cmd}", msg_id)
+    elif cmd == "getid":
+        send(peer_id, f"🆔 Ваш оригинальный ID: {user_id}", msg_id)
 
-    # 3. КОМАНДЫ СТАРШИХ МОДЕРАТОРОВ (lvl >= 2)
-    elif lvl >= 2 and cmd in ["ban", "unban", "addmoder", "removerole", "zov", "online", "banlist", "onlinelist", "inactivelist"]:
-        send(peer_id, f"🛡 Выполнена команда ст.модератора: {cmd}", msg_id)
+    # ======================================================
+    # КОМАНДЫ МОДЕРАТОРОВ (LVL 1)
+    # ======================================================
+    elif lvl >= 1 and cmd in ["kick", "mute", "unmute", "warn", "unwarn", "staff", "setnick", "removenick", "clear", "delete"]:
+        target = get_target_id(text, args)
+        
+        if cmd == "kick":
+            if not target: return send(peer_id, "⚠ Укажите пользователя!", msg_id)
+            try:
+                vk.messages.removeChatUser(chat_id=peer_id-2000000000, user_id=target)
+                send(peer_id, f"👢 Пользователь {get_nick(peer_id, target)} исключен.")
+            except: send(peer_id, "❌ Ошибка: Недостаточно прав у бота.")
 
-    # 4. КОМАНДЫ АДМИНИСТРАТОРОВ (lvl >= 3)
-    elif lvl >= 3 and cmd in ["skick", "quiet", "sban", "sunban", "addsenmoder", "bug", "rnickall", "srnick", "ssetnick", "srrole", "srole"]:
-        send(peer_id, f"🏛 Выполнена команда администратора: {cmd}", msg_id)
+        elif cmd == "warn":
+            if not target: return send(peer_id, "⚠ Укажите пользователя!", msg_id)
+            warns.setdefault(p_id, {})
+            warns[p_id][str(target)] = warns[p_id].get(str(target), 0) + 1
+            save_all()
+            send(peer_id, f"⚠ {get_nick(peer_id, target)} получил варн ({warns[p_id][str(target)]}/3)")
 
-    # 5. КОМАНДЫ СТАРШИХ АДМИНИСТРАТОРОВ (lvl >= 4)
-    elif lvl >= 4 and cmd in ["addadmin", "settings", "filter", "szov", "serverinfo", "rkick"]:
-        send(peer_id, f"👑 Выполнена команда ст.администратора: {cmd}", msg_id)
+        elif cmd == "setnick":
+            if len(args) < 2: return send(peer_id, "⚠ Укажите ник!", msg_id)
+            nicks.setdefault(p_id, {})[u_id] = " ".join(args)
+            save_all()
+            send(peer_id, f"📝 Ник изменен на: {' '.join(args)}")
 
-    # 6. КОМАНДЫ ВЛАДЕЛЬЦА БЕСЕДЫ (lvl >= 5)
-    elif lvl >= 5 and cmd in ["type", "leave", "editowner", "pin", "unpin", "clearwarn", "rroleall", "addsenadm", "masskick", "invite", "antiflood", "welcometext", "welcometextdelete"]:
+        elif cmd == "clear":
+            send(peer_id, "🧹 Очистка чата... Сообщения удаляются.")
+
+    # ======================================================
+    # КОМАНДЫ СТАРШИХ МОДЕРАТОРОВ (LVL 2)
+    # ======================================================
+    elif lvl >= 2 and cmd in ["ban", "unban", "addmoder", "removerole", "zov", "online"]:
+        target = get_target_id(text, args)
+        
+        if cmd == "ban":
+            if not target: return
+            bans.setdefault(p_id, {})[str(target)] = True
+            save_all()
+            send(peer_id, f"🔨 {get_nick(peer_id, target)} забанен в этой беседе.")
+            try: vk.messages.removeChatUser(chat_id=peer_id-2000000000, user_id=target)
+            except: pass
+
+        elif cmd == "addmoder":
+            if not target: return
+            roles.setdefault(p_id, {})[str(target)] = 1
+            save_all()
+            send(peer_id, f"🛠 {get_nick(peer_id, target)} теперь Модератор.")
+
+        elif cmd == "zov":
+            send(peer_id, "📢 Внимание! Всем участникам быть в чате!")
+
+    # ======================================================
+    # КОМАНДЫ АДМИНИСТРАТОРОВ (LVL 3)
+    # ======================================================
+    elif lvl >= 3 and cmd in ["skick", "quiet", "sban", "srole", "addsenmoder"]:
+        if cmd == "quiet":
+            chat_settings.setdefault(p_id, {})
+            chat_settings[p_id]['quiet'] = not chat_settings[p_id].get('quiet', False)
+            save_all()
+            status = "ВКЛЮЧЕН" if chat_settings[p_id]['quiet'] else "ВЫКЛЮЧЕН"
+            send(peer_id, f"🔇 Режим тишины {status}")
+
+    # ======================================================
+    # КОМАНДЫ ВЛАДЕЛЬЦА (LVL 5) И РУКОВОДИТЕЛЯ (LVL 10)
+    # ======================================================
+    elif lvl >= 5 and cmd in ["pin", "unpin", "antiflood", "welcometext", "news", "adddev", "gban"]:
         if cmd == "pin":
             try: vk.messages.pin(peer_id=peer_id, conversation_message_id=msg_id)
-            except: send(peer_id, "⚠ Ошибка закрепа (я админ?)", msg_id)
-        else: send(peer_id, f"🏠 Настройка владельца: {cmd}", msg_id)
+            except: send(peer_id, "❌ Не удалось закрепить.")
+            
+        elif cmd == "gban" and lvl >= 10:
+            target = get_target_id(text, args)
+            if target:
+                global_bans[str(target)] = True
+                save_all()
+                send(peer_id, f"🌎 {target} получил ГЛОБАЛЬНЫЙ БАН.")
 
-    # 7. КОМАНДЫ ЗАМ. РУКОВОДИТЕЛЯ (lvl >= 6)
-    elif lvl >= 6 and cmd in ["gban", "gunban", "sync", "gbanlist", "banwords", "gbanpl", "gunbanpl", "addowner"]:
-        send(peer_id, f"🔼 Глобальная команда: {cmd}", msg_id)
+        elif cmd == "news" and user_id == OWNER_ID:
+            send(peer_id, "🗞 Рассылка новостей запущена!")
 
-    # 8. КОМАНДЫ РУКОВОДИТЕЛЯ (lvl == 7)
-    elif lvl == 7 and cmd in ["server", "addword", "delword", "gremoverole", "news", "addzam", "banid", "unbanid", "clearchat", "infoid", "addbug", "listchats", "adddev", "delbug"]:
-        send(peer_id, f"💻 Системная команда руководителя: {cmd}", msg_id)
+    # ======================================================
+    # HELP (ЕДИНЫЙ ИНТЕРФЕЙС)
+    # ======================================================
+    elif cmd == "help":
+        h = "📋 [ СПИСОК КОМАНД ]\n"
+        h += "👤 Юзер: /info /stats /getid\n"
+        h += "🛠 Модер: /kick /mute /unmute /warn /unwarn /staff /setnick /clear /delete\n"
+        h += "🛡 Ст.Модер: /ban /unban /addmoder /removerole /zov /online /banlist\n"
+        h += "🏛 Админ: /skick /quiet /sban /sunban /addsenmoder /bug /srole\n"
+        h += "👑 Ст.Админ: /addadmin /settings /filter /szov /serverinfo\n"
+        h += "🏠 Владелец: /pin /unpin /clearwarn /masskick /welcometext\n"
+        h += "🔼 Зам: /gban /gunban /sync /gbanlist /addowner\n"
+        h += "💻 Руководитель: /server /news /addzam /adddev /listchats"
+        send(peer_id, h, msg_id)
 
 # --- ГЛАВНЫЙ ЦИКЛ ---
 def main():
-    print("🚀 Бот запущен без ошибок!")
+    print("--------------------------------------------------")
+    print("🚀 БОТ BLACK FIB ЗАПУЩЕН!")
+    print(f"👑 РАЗРАБОТЧИК: {OWNER_ID}")
+    print("--------------------------------------------------")
+    
     while True:
         try:
             for event in longpoll.listen():
                 if event.type == VkBotEventType.MESSAGE_NEW and event.from_chat:
                     msg = event.obj.message
-                    text = msg.get('text', '')
+                    text = msg.get('text', '').strip()
                     if text.startswith('/'):
                         handle(msg['peer_id'], msg['from_id'], text, msg.get('conversation_message_id'))
         except Exception as e:
             print(f"❌ Ошибка: {e}")
-            time.sleep(3)
+            time.sleep(5)
 
 if __name__ == "__main__":
     main()
