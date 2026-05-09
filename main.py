@@ -112,12 +112,6 @@ LOCAL_ROLES_LEVEL = {
 
 ALL_ROLES = {**GLOBAL_ROLES_LEVEL, **LOCAL_ROLES_LEVEL}
 
-# Базовые слова для фильтра
-default_words = ['МатьШЛ']
-for word in default_words:
-    cur.execute("INSERT OR IGNORE INTO banwords VALUES (?)", (word,))
-conn.commit()
-
 # ==================== ФУНКЦИИ ====================
 
 # ----- ГЛОБАЛЬНЫЕ РОЛИ (видны во всех чатах) -----
